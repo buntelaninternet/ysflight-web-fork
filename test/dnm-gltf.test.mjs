@@ -1,0 +1,210 @@
+// Round-trip tests for the Blender bridge core (web/dnm-gltf.js).
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const here = dirname(fileURLToPath(import.meta.url));
+
+let dnmToGlb, glbToDnm, dnmToCollisionSrf, parseDnm;
+try {
+  ({ dnmToGlb, glbToDnm, dnmToCollisionSrf } = await import('../web/dnm-gltf.js'));
+  ({ parseDnm } = await import('../web/dnm-preview.js'));
+} catch (e) {
+  console.error('dnm-gltf import skipped under Node: ' + e.message);
+}
+
+const tris = (p) => [...p.srfByName.values()]
+  .reduce((n, s) => n + s.faces.reduce((m, f) => m + Math.max(0, f.idx.length - 2), 0), 0);
+const movables = (p) => [...p.nodes.values()]
+  .filter((n) => n.sta.length >= 2 && n.sta[0].slice(0, 6).some((v, i) => Math.abs(v - n.sta[n.sta.length - 1][i]) > 1e-6))
+  .map((n) => n.label).sort();
+
+test('dnm -> glb -> dnm round trip preserves the f22 (nodes, tris, movables)', { skip: !dnmToGlb }, () => {
+  const src = readFileSync(join(here, '..', 'upstream', 'YSFLIGHT', 'runtime', 'aircraft', 'f22.dnm'));
+  const fwd = dnmToGlb(src);
+  assert.ok(fwd.nodes > 40, 'f22 exported nodes: ' + fwd.nodes);
+  assert.ok(fwd.animations.includes('Gear') && fwd.animations.includes('Flap'), 'animations: ' + fwd.animations);
+  const back = glbToDnm(fwd.glb);
+  const a = parseDnm(src), b = parseDnm(back.dnm);
+  assert.equal(b.nodes.size, a.nodes.size, 'node count');
+  assert.equal(tris(b), tris(a), 'triangle count');
+  assert.deepEqual(movables(b), movables(a), 'movable node set');
+  // Bright (SRF 'B') faces — the afterburner flames — must survive as B, in
+  // their original colors, on BOTH afterburner nodes.  (Losing B shades the
+  // flame by scene light: the broken-looking afterburner bug.)
+  for (const label of ['Afterburner-1', 'AfterBurner-2']) {
+    const srf = b.srfByName.get(b.nodes.get(label).srf);
+    assert.ok(srf.faces.length > 0, label + ' has faces');
+    assert.ok(srf.faces.every((f) => f.unlit), label + ': every flame face is bright');
+    const colors = new Set(srf.faces.map((f) => f.color.join(',')));
+    assert.ok(colors.has('255,0,0') && colors.has('255,255,255'), label + ' keeps red+white: ' + [...colors]);
+    // ZA translucency survives: stock flame = white core ZA 120 (alpha .53),
+    // red cone ZA 200 (alpha .22).  Losing this renders opaque cones.
+    for (const f of srf.faces) {
+      const expect = f.color[1] === 0 ? (255 - 200) / 255 : (255 - 120) / 255;
+      assert.ok(Math.abs(f.alpha - expect) < 0.01,
+        label + ' ' + f.color.join(',') + ' alpha ' + f.alpha + ' ≈ ' + expect);
+    }
+  }
+});
+
+test('template glb converts and keeps its movable wiring', { skip: !glbToDnm }, () => {
+  const glb = readFileSync(join(here, '..', 'templates', 'aircraft-starter.glb'));
+  const res = glbToDnm(glb);
+  const p = parseDnm(res.dnm);
+  assert.ok(p.nodes.size >= 18, 'template nodes: ' + p.nodes.size);
+  const mv = movables(p);
+  for (const label of ['NoseGear', 'FlapL', 'Elevator', 'Rudder', 'ReverserL', 'VtolNozzleL']) {
+    assert.ok(mv.includes(label), label + ' still movable: ' + mv.join(','));
+  }
+  // Propeller spins (identical STAs, class-driven) — present as a node, CLA 18.
+  assert.equal(p.nodes.get('Propeller').cla, 18);
+});
+
+test('R (round vertex) flags survive dnm -> glb -> dnm', { skip: !dnmToGlb }, () => {
+  // Synthetic model: an octagonal prism whose 16 vertices are all R (smooth),
+  // plus one flat-shaded but TWISTED quad with plain vertices.  Through the
+  // round trip the prism vertices' baked smooth normals deviate from their
+  // face normals (22.5deg), so the converter must re-emit R on them — and
+  // must NOT invent R on the flat quad: fanning a twisted quad makes each
+  // triangle's geometric normal deviate from the authored face normal, which
+  // is exactly how flat tapered wing panels once grew spurious R (dark
+  // patches in flight).  The intra-triangle normal-variance gate keeps them
+  // flat.
+  const V = [], F = [];
+  for (const z of [0, 2]) for (let k = 0; k < 8; k++) {
+    const a = (k * Math.PI) / 4;
+    V.push('V ' + Math.cos(a).toFixed(4) + ' ' + Math.sin(a).toFixed(4) + ' ' + z + ' R');
+  }
+  for (let k = 0; k < 8; k++) {
+    const k2 = (k + 1) % 8, a = ((k + 0.5) * Math.PI) / 4;
+    F.push('F', 'C 200 200 200',
+      'N 0 0 1 ' + Math.cos(a).toFixed(4) + ' ' + Math.sin(a).toFixed(4) + ' 0',
+      'V ' + k + ' ' + k2 + ' ' + (8 + k2) + ' ' + (8 + k), 'E');
+  }
+  V.push('V -1 -1 -4', 'V 1 -1 -4', 'V 1 1 -4', 'V -1 1 -3.6'); // twisted!
+  F.push('F', 'C 200 200 200', 'N 0 0 -3.9 0 0 -1', 'V 16 17 18 19', 'E');
+  const srfLines = ['SURF', ...V, ...F, 'E'];
+  const dnm = ['DYNAMODEL', 'DNMVER 2', 'PCK prism.srf ' + srfLines.length, ...srfLines,
+    'SRF "Body"', 'FIL prism.srf', 'CLA 0', 'NST 1', 'STA 0 0 0 0 0 0 1',
+    'POS 0 0 0 0 0 0 1', 'CNT 0 0 0', 'REL DEP', 'NCH 0', 'END', 'END', ''].join('\n');
+
+  const back = glbToDnm(dnmToGlb(new TextEncoder().encode(dnm)).glb);
+  const p = parseDnm(back.dnm);
+  const srf = [...p.srfByName.values()][0];
+  assert.equal(tris(p), 18, 'triangle count');
+  const rOn = (pred) => srf.vertices.filter((v, i) => pred(v) && srf.smooth[i]).length;
+  assert.equal(rOn((v) => v[2] > -1), 16, 'all 16 prism vertices keep R');
+  assert.equal(rOn((v) => v[2] < -1), 0, 'flat quad vertices stay non-R');
+});
+
+// --- chirality (right-handed glTF; see the module-header CHIRALITY note) ---------
+
+// A deliberately asymmetric one-node model: a triangle out on the STARBOARD
+// (+X in YS coords) side, plus a node POS that translates starboard.
+const asymDnm = () => {
+  const srfLines = ['SURF', 'V 2 0 0', 'V 3 1 5', 'V 3 -1 5',
+    'F', 'C 200 100 50', 'N 2.67 0 3.33 -1 0 0', 'V 0 1 2', 'E', 'E'];
+  return new TextEncoder().encode(['DYNAMODEL', 'DNMVER 2',
+    'PCK asym.srf ' + srfLines.length, ...srfLines,
+    'SRF "Wing"', 'FIL asym.srf', 'CLA 0', 'NST 1', 'STA 0 0 0 0 0 0 1',
+    'POS 4 0 0 0 0 0 1', 'CNT 0 0 0', 'REL DEP', 'NCH 0', 'END', 'END', ''].join('\n'));
+};
+
+// Pull the JSON chunk and BIN chunk out of a GLB.
+const glbChunks = (glb) => {
+  const dv = new DataView(glb.buffer, glb.byteOffset, glb.byteLength);
+  const jsonLen = dv.getUint32(12, true);
+  const json = JSON.parse(new TextDecoder().decode(glb.subarray(20, 20 + jsonLen)));
+  const bin = glb.subarray(20 + jsonLen + 8);
+  return { json, bin };
+};
+const positionsOf = (json, bin, meshIx) => {
+  const acc = json.accessors[json.meshes[meshIx].primitives[0].attributes.POSITION];
+  const bv = json.bufferViews[acc.bufferView];
+  const f = new Float32Array(acc.count * 3);
+  const src = new DataView(bin.buffer, bin.byteOffset + (bv.byteOffset || 0), acc.count * 12);
+  for (let i = 0; i < f.length; i++) f[i] = src.getFloat32(i * 4, true);
+  return f;
+};
+
+test('export is right-handed: starboard flips to -X, winding stays outward, rh marked', { skip: !dnmToGlb }, () => {
+  const { json, bin } = glbChunks(dnmToGlb(asymDnm()).glb);
+  const node = json.nodes.find((n) => n.name === 'Wing');
+  assert.equal(node.extras.ysflight.rh, 1, 'rh marker on the node');
+  assert.deepEqual(node.extras.ysflight.pos, [4, 0, 0, 0, 0, 0], 'extras POS stays verbatim YS');
+  assert.equal(node.translation[0], -4, 'node translation mirrored');
+  const p = positionsOf(json, bin, node.mesh);
+  assert.ok([p[0], p[3], p[6]].every((x) => x < 0), 'starboard geometry lands at -X: ' + [p[0], p[3], p[6]]);
+  // Winding-derived normal must agree with the face's outward direction,
+  // which after mirroring is +X (YS -X face normal on a starboard-facing...
+  // no: the face pointed -X (inboard-left) in YS, so mirrored it points +X).
+  const e1 = [p[3] - p[0], p[4] - p[1], p[5] - p[2]];
+  const e2 = [p[6] - p[0], p[7] - p[1], p[8] - p[2]];
+  const nx = e1[1] * e2[2] - e1[2] * e2[1];
+  assert.ok(nx > 0, 'winding-derived normal points +X after the mirror: ' + nx);
+});
+
+test('rh glb round-trips to the exact original YS coordinates', { skip: !dnmToGlb }, () => {
+  const back = glbToDnm(dnmToGlb(asymDnm()).glb);
+  const p = parseDnm(back.dnm);
+  const srf = [...p.srfByName.values()][0];
+  const got = srf.vertices.map((v) => v.join(',')).sort();
+  assert.deepEqual(got, ['2,0,0', '3,-1,5', '3,1,5'], 'vertices restored verbatim');
+  const n = p.nodes.get('Wing');
+  assert.deepEqual(n.pos.slice(0, 3), [4, 0, 0], 'POS restored verbatim');
+  // The restored face must still name an inboard (-X) normal on its N line.
+  assert.ok(srf.faces[0].nom[0] < 0, 'N normal restored inboard: ' + srf.faces[0].nom);
+});
+
+test('legacy glb (extras, no rh marker) imports unflipped — same DNM as the new template', { skip: !glbToDnm }, () => {
+  // The fixture is the pre-flip export of templates/aircraft-starter.dnm; the
+  // shipped template is the SAME dnm through the new right-handed exporter.
+  // Both must import to the identical DNM — that is the whole compatibility
+  // contract for previously downloaded / Blender-edited files.
+  const legacy = glbToDnm(readFileSync(join(here, 'fixtures', 'legacy-aircraft-starter.glb')));
+  const fresh = glbToDnm(readFileSync(join(here, '..', 'templates', 'aircraft-starter.glb')));
+  assert.equal(new TextDecoder().decode(legacy.dnm), new TextDecoder().decode(fresh.dnm));
+});
+
+test('foreign glb (no extras anywhere) is treated as right-handed and mirrored in', { skip: !dnmToGlb }, () => {
+  // Simulate a from-scratch Blender/Flightradar24 file: take an rh export and
+  // strip every extras block.  The geometry inside is genuinely right-handed,
+  // so the importer must mirror it — landing back on the YS original.
+  const glb = dnmToGlb(asymDnm()).glb;
+  const { json, bin } = glbChunks(glb);
+  delete json.asset.extras;
+  for (const n of json.nodes) delete n.extras;
+  const enc = new TextEncoder();
+  const j0 = enc.encode(JSON.stringify(json));
+  const jPad = (4 - (j0.length % 4)) % 4;
+  const bPad = (4 - (bin.length % 4)) % 4;
+  const total = 12 + 8 + j0.length + jPad + 8 + bin.length + bPad;
+  const out = new Uint8Array(total);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, 0x46546c67, true); dv.setUint32(4, 2, true); dv.setUint32(8, total, true);
+  dv.setUint32(12, j0.length + jPad, true); dv.setUint32(16, 0x4e4f534a, true);
+  out.set(j0, 20); out.fill(0x20, 20 + j0.length, 20 + j0.length + jPad);
+  const bh = 20 + j0.length + jPad;
+  dv.setUint32(bh, bin.length + bPad, true); dv.setUint32(bh + 4, 0x004e4942, true);
+  out.set(bin, bh + 8);
+
+  const p = parseDnm(glbToDnm(out).dnm);
+  const srf = [...p.srfByName.values()][0];
+  // Baked node transform (translation -4 in glTF space) + mirror = YS +4 offset.
+  const got = srf.vertices.map((v) => v.join(',')).sort();
+  assert.deepEqual(got, ['6,0,0', '7,-1,5', '7,1,5'], 'foreign geometry mirrored into YS: ' + got);
+});
+
+test('collision shell bakes visible rest geometry, skips retracted gear', { skip: !dnmToCollisionSrf }, () => {
+  const dnm = readFileSync(join(here, '..', 'templates', 'aircraft-starter.dnm'));
+  const total = (new TextDecoder().decode(dnm).match(/^F$/gm) || []).length;
+  const coll = new TextDecoder().decode(dnmToCollisionSrf(dnm));
+  assert.match(coll, /^SURF\n/, 'starts with SURF');
+  const collFaces = (coll.match(/^F$/gm) || []).length;
+  assert.ok(collFaces > 0, 'has faces');
+  // The three gear nodes are hidden at rest (STA0 vis=0) and must be excluded.
+  assert.ok(collFaces < total, 'fewer faces than the full model: ' + collFaces + ' < ' + total);
+});

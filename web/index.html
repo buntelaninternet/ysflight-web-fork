@@ -1,0 +1,2217 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0a0e14">
+<meta name="description" content="Fly YSFLIGHT in your browser: a free, unofficial WebAssembly port of the classic flight sim. No install, instant multiplayer.">
+<!-- Social link-preview (Open Graph + Twitter): shared Room/invite links are the
+     growth loop, so they must unfurl with a title, blurb and image, not a bare URL.
+     The image is an in-game cockpit screenshot (icons/og-cover.png, 1200x630). -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="YSFLIGHT web">
+<meta property="og:title" content="YSFLIGHT web: fly in your browser">
+<meta property="og:description" content="A free, unofficial WebAssembly port of YSFLIGHT. No install, instant flight and multiplayer, right in the browser.">
+<meta property="og:url" content="https://ysflight-web.toming.app/">
+<meta property="og:image" content="https://ysflight-web.toming.app/icons/og-cover.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="YSFLIGHT web: fly in your browser">
+<meta name="twitter:description" content="A free, unofficial WebAssembly port of YSFLIGHT. No install, instant flight and multiplayer, right in the browser.">
+<meta name="twitter:image" content="https://ysflight-web.toming.app/icons/og-cover.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<!-- diag.js: plain (non-module) script, loaded FIRST so error capture and the
+     unclean-end check are armed before any other script can fail.  Ships
+     heartbeats/errors/breadcrumbs to /clientlog (Workers Logs) for in-headset
+     postmortems -- see web/diag.js. -->
+<script src="diag.js"></script>
+<script src="deeplink.js"></script>
+<!-- metrics.js: usage counting (Analytics Engine via /metric).  After diag.js,
+     whose event stream it subscribes to, and after deeplink.js, whose
+     launchTargets() it reads at construction -- see docs/metrics.md. -->
+<script src="metrics.js"></script>
+<script src="yfs.js"></script>
+<script src="settings.js"></script>
+<script src="controls.js"></script>
+<script type="module" src="packs-ui.js"></script>
+<script type="module" src="pack-net.js"></script>
+<script type="module" src="replays-ui.js"></script>
+<title>YSFLIGHT web</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #000;
+  }
+  #canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    outline: none;
+  }
+  /* ==== XP (Luna) tone & manner ============================================
+     The shell dresses as a 2002-era desktop app (the era YSFLIGHT is from):
+     Luna-blue titlebar, dialog face #ECE9D8, groupbox captions #0046D5,
+     ListView selection #316AC5, XP-green progress, statusbar with a grip.
+     Era idioms quoted on purpose: "(letter)" access-key captions, a "..."
+     suffix meaning "opens another page", the DEFAULT (bold-ringed) button as
+     the primary action.  No emoji as icons — text buttons, like the era. */
+  #overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    /* `safe` so that when the content is taller than the viewport it falls back
+       to top-alignment and the overflow stays scrollable instead of being
+       clipped off the top of a centered flex container. */
+    justify-content: safe center;
+    overflow-y: auto;
+    padding: 22px 8px 30px;
+    box-sizing: border-box;
+    background: linear-gradient(180deg, #7FB2F0 0%, #4E86DD 45%, #2E64C8 100%);
+    color: #000;
+    font-family: Tahoma, 'MS UI Gothic', 'Yu Gothic UI', 'Hiragino Kaku Gothic ProN', system-ui, sans-serif;
+    font-size: 13px;
+    transition: opacity 0.4s;
+    z-index: 10;
+  }
+  /* Bliss nod: a green hill on the horizon.  Viewport-fixed so it stays put
+     while the overlay scrolls; painted before (= under) the window children. */
+  #overlay::before {
+    content: "";
+    position: fixed;
+    left: -20%;
+    right: -20%;
+    bottom: -14vh;
+    height: 36vh;
+    background: radial-gradient(ellipse at 50% 100%, #55B03C 0%, #3F9C35 45%, transparent 72%);
+    pointer-events: none;
+  }
+  #overlay.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+  /* Stop the indeterminate shimmers once boot hides the overlay.  The ?join /
+     ?freeflight / ?replay paths only add .hidden (opacity:0) without display:none, and
+     browsers keep compositing animations on opacity:0 elements — so without this the
+     sheen would run forever behind the live game. */
+  #overlay.hidden #progress::after,
+  #overlay.hidden #ysfw-skeleton .sk-card::after { animation: none; }
+
+  /* ---- the window ---- */
+  .xp-win {
+    width: min(760px, 100%);
+    flex: none;
+    border-radius: 8px 8px 4px 4px;
+    background: #ECE9D8;
+    box-shadow: 0 0 0 1px #0831D9, 4px 7px 22px rgba(0, 20, 60, 0.5);
+    overflow: hidden;
+    position: relative;
+  }
+  .xp-titlebar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 6px 6px 10px;
+    background: linear-gradient(180deg, #2B76E5 0%, #215DCF 6%, #3D8FFF 42%, #245EDC 88%, #1B54B0 100%);
+    color: #fff;
+    font-weight: 700;
+    font-size: 13.5px;
+    font-family: 'Trebuchet MS', Tahoma, sans-serif;
+    text-shadow: 1px 1px 1px rgba(10, 30, 90, 0.75);
+  }
+  .xp-titlebar svg { width: 17px; height: 17px; flex: none; }
+  .xp-titlebar .t { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .xp-cap {
+    width: 22px; height: 21px; flex: none; border-radius: 3px;
+    border: 1px solid rgba(255,255,255,.75);
+    font-size: 12px; line-height: 19px; text-align: center; color: #fff; font-family: Tahoma, monospace;
+    background: linear-gradient(180deg, #7BA5EC, #3E6FD3 45%, #2E5BC0);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.5);
+  }
+  .xp-cap.close { background: linear-gradient(180deg, #F0A088, #DD6547 40%, #C33B1E); }
+  .xp-body { padding: 12px 12px 8px; }
+  .xp-statusbar {
+    display: flex; gap: 3px; padding: 4px;
+    background: #ECE9D8; border-top: 1px solid #fff;
+    box-shadow: inset 0 1px 0 #D8D4C4; position: relative;
+  }
+  .xp-cell {
+    font-size: 11px; color: #444; padding: 3px 8px; white-space: nowrap;
+    border: 1px solid; border-color: #ACA899 #fff #fff #ACA899; border-radius: 1px;
+    overflow: hidden; text-overflow: ellipsis; min-height: 1.2em;
+  }
+  .xp-cell.grow { flex: 1; }
+  .xp-grip {
+    position: absolute; right: 3px; bottom: 3px; width: 13px; height: 13px;
+    background:
+      radial-gradient(circle at 10px 10px, #999 1.2px, transparent 1.6px),
+      radial-gradient(circle at 6px 10px, #999 1.2px, transparent 1.6px),
+      radial-gradient(circle at 10px 6px, #999 1.2px, transparent 1.6px),
+      radial-gradient(circle at 2px 10px, #999 1.2px, transparent 1.6px),
+      radial-gradient(circle at 6px 6px, #999 1.2px, transparent 1.6px),
+      radial-gradient(circle at 10px 2px, #999 1.2px, transparent 1.6px);
+  }
+
+  /* ---- download row (status + progress) ---- */
+  .xp-dl { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  #status { flex: none; font-size: 12px; color: #333; min-height: 1.2em; }
+  #progress {
+    position: relative;
+    flex: 1;
+    height: 17px;
+    background: #fff;
+    border: 1px solid #686868;
+    border-radius: 3px;
+    box-shadow: inset 1px 1px 2px rgba(0, 0, 0, 0.2);
+    padding: 2px;
+    overflow: hidden;
+    box-sizing: border-box;
+  }
+  #progress > div {
+    height: 100%;
+    width: 0;
+    border-radius: 1px;
+    background: linear-gradient(180deg, #8DF13C 0%, #4FD62E 45%, #2FB821 100%);
+    transition: width 0.2s;
+  }
+  /* XP block segmentation over the green fill */
+  #progress::before {
+    content: "";
+    position: absolute;
+    inset: 2px;
+    background: repeating-linear-gradient(90deg, transparent 0 12px, #fff 12px 14px);
+    pointer-events: none;
+    z-index: 1;
+  }
+  /* Indeterminate sheen over the track so a slow link — or the post-download wasm
+     compile phase, where the numeric width can't advance — never looks frozen. */
+  #progress::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(100deg, transparent 20%, rgba(255,255,255,0.6) 50%, transparent 80%);
+    transform: translateX(-100%);
+    animation: ysfw-shimmer 1.4s ease-in-out infinite;
+  }
+  /* Loading skeleton: a non-interactive preview of the panel, painted immediately
+     during the (~25MB) .data download so the wait shows its destination instead of
+     a bare bar.  Removed by renderPanel() at manual launch, or hidden with the
+     overlay at boot (?join / ?freeflight). */
+  #ysfw-skeleton {
+    margin-top: 2px;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    box-sizing: border-box;
+  }
+  #ysfw-skeleton .sk-row { display: flex; gap: 8px; }
+  #ysfw-skeleton .sk-card {
+    flex: 1;
+    height: 40px;
+    border-radius: 3px;
+    background: #F2F1E5;
+    border: 1px solid #D0D0BF;
+    position: relative;
+    overflow: hidden;
+  }
+  #ysfw-skeleton .sk-hero { height: 52px; border-color: #ACA899; }
+  #ysfw-skeleton .sk-card::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(100deg, transparent 20%, rgba(49,106,197,0.10) 50%, transparent 80%);
+    transform: translateX(-100%);
+    animation: ysfw-shimmer 1.6s ease-in-out infinite;
+  }
+  @keyframes ysfw-shimmer { to { transform: translateX(100%); } }
+  /* Respect users who asked for less motion: drop the shimmer + opacity/width fades. */
+  @media (prefers-reduced-motion: reduce) {
+    #progress::after, #ysfw-skeleton .sk-card::after { animation: none; }
+    #overlay, #progress > div { transition: none; }
+  }
+  /* Touch targets: the bottom-right shell row (Room chip, ? Help, fullscreen,
+     connection badge) uses compact 12px buttons; lift them to the 44px minimum on
+     coarse pointers so a thumb can hit them (esp. the Room chip = invite-link copy). */
+  @media (pointer: coarse) {
+    #ysfw-br-stack > * { min-height: 44px; min-width: 44px; box-sizing: border-box; }
+  }
+
+  /* ---- widgets (used by index.html forms and packs-ui.js) ---- */
+  #overlay fieldset {
+    border: 1px solid #D0D0BF;
+    border-radius: 5px;
+    padding: 10px 10px 12px;
+    margin: 0 0 12px;
+    background: #F2F1E5;
+    min-width: 0;
+  }
+  #overlay legend { padding: 0 6px; font-size: 13px; color: #0046D5; }
+  .xp-btn {
+    display: inline-block;
+    color: #000;
+    text-decoration: none;
+    text-align: center;
+    border: 1px solid #003C74;
+    border-radius: 3.5px;
+    background: linear-gradient(180deg, #FFFFFF 0%, #F4F2E7 55%, #E5E1CE 90%, #D8D0B8 100%);
+    box-shadow: inset 0 -2px 2px rgba(160, 140, 90, 0.22);
+    padding: 7px 14px;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    min-height: 32px;
+    box-sizing: border-box;
+  }
+  .xp-btn:hover { box-shadow: inset 0 0 0 2px rgba(248, 179, 53, 0.65), inset 0 -2px 2px rgba(160, 140, 90, 0.18); }
+  .xp-btn:active { background: linear-gradient(180deg, #E5E1CE, #F4F2E7); }
+  .xp-btn.default { box-shadow: inset 0 0 0 2px rgba(70, 120, 210, 0.55), inset 0 -2px 2px rgba(160, 140, 90, 0.18); font-weight: 700; }
+  .xp-btn.default:hover { box-shadow: inset 0 0 0 2px rgba(248, 179, 53, 0.65), inset 0 -2px 2px rgba(160, 140, 90, 0.18); }
+  .xp-btn.tile { text-align: left; padding: 8px 10px; }
+  .xp-btn.tile b { display: block; font-size: 13px; }
+  .xp-btn.tile span { display: block; font-size: 11px; color: #555; margin-top: 2px; font-weight: 400; }
+  .xp-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px; }
+  .xp-rowline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .xp-note { font-size: 11px; color: #555; line-height: 1.5; }
+  .xp-list { background: #fff; border: 1px solid #ACA899; border-radius: 2px; margin-bottom: 8px; }
+  .xp-list .hd, .xp-list .row { display: grid; grid-template-columns: 1.1fr 1.4fr 0.55fr; gap: 8px; padding: 5px 8px; }
+  .xp-list .hd {
+    background: linear-gradient(180deg, #FFFFFF, #F0EEE1 70%, #E3E0CE);
+    border-bottom: 1px solid #ACA899;
+    font-size: 11px;
+    color: #333;
+  }
+  .xp-list .row {
+    font-size: 12.5px;
+    cursor: pointer;
+    border: 0;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    font-family: inherit;
+    color: #000;
+  }
+  .xp-list .row:hover { background: #F3F7FD; }
+  .xp-list .row.sel { background: #316AC5; color: #fff; }
+  .xp-list .c2 { color: #555; } .xp-list .sel .c2 { color: #d7e2f6; }
+  .xp-list .c3 { color: #777; font-size: 11px; } .xp-list .sel .c3 { color: #d7e2f6; }
+  .xp-desc {
+    background: #FFFFE1;
+    border: 1px solid #ACA899;
+    border-radius: 2px;
+    padding: 6px 8px;
+    font-size: 11.5px;
+    color: #333;
+    margin-bottom: 8px;
+    min-height: 30px;
+    box-sizing: border-box;
+  }
+  .xp-input {
+    font-size: 13px;
+    padding: 6px 8px;
+    border: 1px solid #7F9DB9;
+    border-radius: 2px;
+    background: #fff;
+    color: #000;
+    font-family: inherit;
+    box-sizing: border-box;
+  }
+  .xp-link {
+    background: none;
+    border: 0;
+    color: #0046D5;
+    font-size: 12.5px;
+    cursor: pointer;
+    padding: 4px;
+    text-decoration: underline;
+    font-family: inherit;
+  }
+  @media (max-width: 640px) {
+    .xp-tiles { grid-template-columns: 1fr 1fr; }
+    .xp-list .hd, .xp-list .row { grid-template-columns: 1fr 0.5fr; }
+    .xp-list .hd .c2, .xp-list .row .c2 { display: none; }
+  }
+
+  /* status/pitch text that predates the window frame: the titlebar carries the
+     tagline and the statusbar the load hint, so both stay in the DOM (they are
+     aria-live / referenced) but hidden. */
+  #pitch, #loadhint { display: none; }
+  #note {
+    margin-top: 10px;
+    font-size: 10.5px;
+    color: #EAF2FF;
+    max-width: 640px;
+    text-align: center;
+    line-height: 1.6;
+    text-shadow: 0 1px 2px rgba(0, 20, 60, 0.55);
+    position: relative;
+  }
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div class="xp-win">
+    <div class="xp-titlebar">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1l1.2 5.2L15 8l-5.8 1.8L8 15l-1.2-5.2L1 8l5.8-1.8z" fill="#fff"/></svg>
+      <span class="t"><span>YSFLIGHT web</span><span id="ysfw-tagline"></span></span>
+      <span class="xp-cap" aria-hidden="true">_</span><span class="xp-cap" aria-hidden="true">□</span><span class="xp-cap close" aria-hidden="true">×</span>
+    </div>
+    <div class="xp-body" id="ysfw-win-body">
+      <div class="xp-dl">
+        <div id="status" role="status" aria-live="polite">loading...</div>
+        <div id="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="loading"><div id="bar"></div></div>
+      </div>
+      <div id="pitch"></div>
+      <div id="loadhint"></div>
+      <div id="ysfw-skeleton" aria-hidden="true">
+        <div class="sk-card sk-hero"></div>
+        <div class="sk-row"><div class="sk-card"></div><div class="sk-card"></div></div>
+        <div class="sk-row"><div class="sk-card"></div><div class="sk-card"></div></div>
+      </div>
+    </div>
+    <div class="xp-statusbar">
+      <span class="xp-cell grow" id="ysfw-sb-ready"></span>
+      <span class="xp-cell" id="ysfw-sb-hint"></span>
+      <span class="xp-cell" id="ysfw-sb-build"></span>
+      <span class="xp-grip" aria-hidden="true"></span>
+    </div>
+  </div>
+  <div id="note">
+    YS FLIGHT SIMULATOR (c) Soji Yamakawa (CaptainYS) — an unofficial, fan-made WebAssembly port.<br>
+    <span id="note-src">元データ・ソースコード: </span><a href="https://github.com/captainys/YSFLIGHT" style="color:#fff;font-weight:700">captainys/YSFLIGHT</a>
+  </div>
+</div>
+<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+<script>
+  // Asset names; scripts/build.sh rewrites this line with content-hashed names.
+  var ASSET = {js:'ysflight32_gl2.js',wasm:'ysflight32_gl2.wasm',data:'ysflight32_gl2.data',build:'dev'}; // __ASSET_LINE__
+
+  var overlay = document.getElementById('overlay');
+  var bar = document.getElementById('bar');
+  var progressEl = document.getElementById('progress');
+  var statusEl = document.getElementById('status');
+  var booted = false;
+
+  // Shell UI locale.  Mirrors the engine's own ja/en selection (?lang, else the
+  // browser locale): the wasm UI already localizes, this localizes the pre-boot
+  // shell (loading note, connection badge, Room chip, join forms, pack panel).
+  // Exposed on window so packs-ui.js shares the same choice.
+  window.ysfwLang = (function () {
+    var q = new URLSearchParams(location.search).get('lang');
+    var l = String(q || navigator.language || 'en').toLowerCase();
+    return l.indexOf('ja') === 0 ? 'ja' : 'en';
+  })();
+  var TXT = ({
+    ja: {
+      note: '元データ・ソースコード: ',
+      pitch: 'あの YSFLIGHT が無料でブラウザに——飛行感覚は原典そのまま。手持ちのアドオンもソロで読み込めます。インストール不要、URL を開くだけ（スマホ対応）。',
+      loadHint: '初回だけ約25MBを読み込みます（2回目以降は瞬時・オフラインでも起動）。',
+      tagline: ' ── あの YSFLIGHT がブラウザで、原典そのまま',
+      sbHint: '2回目以降は瞬時・オフライン起動可',
+      chipCopyTitle: 'クリックで招待リンクをコピー',
+      chipCopied: '✓ 招待リンクをコピーしました',
+      connecting: '（接続中…）',
+      badgeTitle: '対戦の接続性チェック（クリックで再確認）',
+      badgeChecking: '接続を確認中…',
+      badgeCheckingTitle: '対戦の接続性をチェックしています',
+      badgeOffline: '🟠 接続を確認できません',
+      badgeOfflineTitle: 'STUN サーバに到達できませんでした。ネットワーク／ファイアウォール、またはオフラインの可能性があります（TURN の TLS/443 経由なら繋がる場合もあります）。クリックで再確認。',
+      badgeRelay: '🟡 TURN 中継で接続',
+      badgeRelayTitle: 'この回線は通信タイプが厳しめ（対称NAT）で直結できないことがありますが、TURN リレー経由で接続できます。直結よりわずかに遅延が増えます。クリックで再確認。',
+      badgeSymmetric: '🟡 一部の相手と繋がらないかも',
+      badgeSymmetricTitle: 'この回線は通信タイプが厳しめ（対称NAT）です。TURN 中継が未設定のため、相手も同じタイプだと直接つながらないことがあります。クリックで再確認。',
+      badgeDirect: '🟢 マルチプレイOK',
+      badgeDirectTitle: 'この回線は対戦に適しています（多くの相手と直接つながります）。クリックで再確認。',
+      joinLabel: 'Room ID で参加',
+      joinToggle: 'Room ID で参加(I)...',
+      joinNamePlaceholder: '名前（任意）',
+      joinBtn: 'ルームに参加',
+      errRoomEmpty: 'Room ID を入力してください',
+      errRoomInvalid: 'Room ID は英数字・- ・_（14文字以内）で入力してください',
+      inviteNameLabel: function (room) { return 'Room ' + room + ' に参加 — 名前（任意）'; },
+      inviteJoinBtn: '参加する',
+      syncError: '(同期エラー)',
+      joinSyncing: 'ホストのパックを同期中…',
+      joinProgress: function (done, total) { return 'ホストのパックを同期中… ' + done + '/' + total; },
+      materializing: function (d, t) { return 'アドオンを展開中… ' + d + '/' + t; },
+      packsSkipped: function (n, names) { return n + ' 個のアドオンを読み込めませんでした（取り込みデータの解析に失敗）。再取り込みをお試しください。' + (names ? '：' + names : ''); },
+      help: {
+        title: '操作 / Controls',
+        toggleTitle: 'ヘルプ（? キーで開閉）',
+        openHint: '? ヘルプ',
+        close: '閉じる',
+        fsOpen: '⛶ 全画面',
+        fsTitle: '全画面切替（F11 / ⌃⌘F）',
+        vrEnter: '🥽 VR',
+        vrExit: '🥽 VR終了',
+        vrTitle: 'VRヘッドセットで飛ぶ（WebXR・実験的機能）。メインメニューまたはフライト中に開始してください',
+        vrFail: 'VRセッションを開始できませんでした',
+        vrMenuUnsupported: 'VRメニューにはWebXRレイヤー対応ブラウザ（Quest等）が必要です。フライト開始後にVRへ入ってください',
+        vrWrongContext: 'VRはメインメニューまたはフライト中に開始してください。デモなどの2D画面はVR表示に対応していません',
+        vrTapEnter: '🥽 タップしてVRに入る',
+        vrTapEnterSub: '起動が完了しました。ブラウザの制限により、もう一度タップが必要です',
+        intro: 'ジョイスティック未接続なら マウスが操縦桿 です。',
+        rows: [
+          ['マウス移動', '操縦桿（上下＝ピッチ / 左右＝ロール）'],
+          ['左クリック / Space', '武器発射'],
+          ['Q / A', 'スロットル ＋ / −'],
+          ['Z / X / C', 'ラダー 左 / 中央 / 右'],
+          ['Tab', 'アフターバーナー'],
+          ['G', '降着装置（ギア）'],
+          ['B', 'スポイラー＆ブレーキ'],
+          ['R / F', 'フラップ 上げ / 下げ'],
+          ['F1〜F4', '視点（コックピット / 外部 / 相手機 / 兵装）'],
+          ['ホイール', 'ズーム'],
+          ['矢印キー', '視点の向き'],
+        ],
+      },
+      touch: { fire: '発射', gear: 'ギア', thr: '推力', wsel: '武器切替', brake: 'ブレーキ', view: '視点', rudder: 'ラダー', flap: 'フラップ', radar: 'レーダー', ap: '自動操縦', nudge: 'お試し版 — PC / タブレットだと全機能で快適です' },
+      host: {
+        toggle: 'ホストを立てる(H)...',
+        namePlaceholder: '名前（任意）',
+        btn: 'ホスト開始',
+        hint: 'ホストが立つと画面右下に「Room: 番号」が出ます。クリックで招待リンクをコピーし、友達に送って参加してもらいましょう。',
+        note: '※ カスタム機体・マップで対戦するときは、参加者全員が同じアドオンを各自で事前に取り込んでください（v1では自動配信されません）。',
+      },
+    },
+    en: {
+      note: 'Source & assets: ',
+      pitch: 'The YSFLIGHT you know, free in your browser — same flight feel as the original. Load your own add-ons in solo. No install, just open the URL (touch-friendly).',
+      loadHint: 'First load fetches about 25MB once — instant and offline-ready afterwards.',
+      tagline: ' ── the YSFLIGHT you know, in your browser',
+      sbHint: 'Instant & offline after first load',
+      chipCopyTitle: 'Click to copy the invite link',
+      chipCopied: '✓ Invite link copied',
+      connecting: ' (connecting…)',
+      badgeTitle: 'Multiplayer connectivity check (click to re-check)',
+      badgeChecking: 'Checking connection…',
+      badgeCheckingTitle: 'Checking multiplayer connectivity',
+      badgeOffline: '🟠 Can’t check connection',
+      badgeOfflineTitle: 'Could not reach a STUN server — you may be offline or behind a firewall (TURN over TLS/443 may still connect). Click to re-check.',
+      badgeRelay: '🟡 Connects via TURN relay',
+      badgeRelayTitle: 'This network is restrictive (symmetric NAT) so direct P2P may fail, but you can still connect through the TURN relay. Slightly higher latency than a direct connection. Click to re-check.',
+      badgeSymmetric: '🟡 Some peers may not connect',
+      badgeSymmetricTitle: 'This network is restrictive (symmetric NAT). No TURN relay is configured, so peers on the same kind of network may not connect directly. Click to re-check.',
+      badgeDirect: '🟢 Multiplayer OK',
+      badgeDirectTitle: 'This network is good for multiplayer (direct connection to most peers). Click to re-check.',
+      joinLabel: 'Join by Room ID',
+      joinToggle: 'Join by Room ID (I)...',
+      joinNamePlaceholder: 'Name (optional)',
+      joinBtn: 'Join room',
+      errRoomEmpty: 'Enter a Room ID',
+      errRoomInvalid: 'Room ID: letters, digits, - and _ only (max 14 chars)',
+      inviteNameLabel: function (room) { return 'Joining Room ' + room + ' — name (optional)'; },
+      inviteJoinBtn: 'Join',
+      syncError: '(sync error)',
+      joinSyncing: 'Syncing the host’s add-ons…',
+      joinProgress: function (done, total) { return 'Syncing the host’s add-ons… ' + done + '/' + total; },
+      materializing: function (d, t) { return 'Loading add-ons… ' + d + '/' + t; },
+      packsSkipped: function (n, names) { return n + ' add-on(s) could not be loaded (failed to parse the imported data). Try re-importing them.' + (names ? ': ' + names : ''); },
+      help: {
+        title: 'Controls',
+        toggleTitle: 'Controls guide (press ? to toggle)',
+        openHint: '? Help',
+        close: 'Close',
+        fsOpen: '⛶ Fullscreen',
+        fsTitle: 'Toggle fullscreen (F11 / ⌃⌘F)',
+        vrEnter: '🥽 VR',
+        vrExit: '🥽 Exit VR',
+        vrTitle: 'Fly in a VR headset (WebXR, experimental). Start from the main menu or during a flight',
+        vrFail: 'Could not start the VR session',
+        vrMenuUnsupported: 'The VR menu requires a WebXR-layers-capable browser (e.g. Quest). Enter VR after starting a flight instead',
+        vrWrongContext: 'Start VR from the main menu or during a flight. 2D-only screens such as the demo are not available in VR',
+        vrTapEnter: '🥽 Tap to enter VR',
+        vrTapEnterSub: 'Boot finished. The browser needs one more tap to start VR',
+        intro: 'With no joystick, your mouse is the control stick.',
+        rows: [
+          ['Move mouse', 'Control stick (up/down = pitch, left/right = roll)'],
+          ['Left click / Space', 'Fire weapon'],
+          ['Q / A', 'Throttle + / −'],
+          ['Z / X / C', 'Rudder left / center / right'],
+          ['Tab', 'Afterburner'],
+          ['G', 'Landing gear'],
+          ['B', 'Spoiler & brake'],
+          ['R / F', 'Flaps up / down'],
+          ['F1–F4', 'View (cockpit / outside / target / weapon)'],
+          ['Wheel', 'Zoom'],
+          ['Arrow keys', 'Look around'],
+        ],
+      },
+      touch: { fire: 'Fire', gear: 'Gear', thr: 'Thrust', wsel: 'Weapon', brake: 'Brake', view: 'View', rudder: 'Rudder', flap: 'Flaps', radar: 'Radar', ap: 'A/P', nudge: 'Taster — best with all controls on PC / tablet' },
+      host: {
+        toggle: 'Host a room (H)...',
+        namePlaceholder: 'Name (optional)',
+        btn: 'Start hosting',
+        hint: 'Once the room is up, a “Room: <id>” chip appears bottom-right — click it to copy the invite link and send it to your friends.',
+        note: '* For custom aircraft or maps, every player must import the same add-ons beforehand (v1 does not auto-distribute them).',
+      },
+    },
+  })[window.ysfwLang];
+  document.documentElement.lang = window.ysfwLang;
+  (function () {
+    var n = document.getElementById('note-src'); if (n) n.textContent = TXT.note;
+    var p = document.getElementById('pitch'); if (p) p.textContent = TXT.pitch;
+    var lh = document.getElementById('loadhint'); if (lh) lh.textContent = TXT.loadHint;
+    var tg = document.getElementById('ysfw-tagline'); if (tg) tg.textContent = TXT.tagline;
+    var sh = document.getElementById('ysfw-sb-hint'); if (sh) sh.textContent = TXT.sbHint;
+    var sb = document.getElementById('ysfw-sb-build'); if (sb) sb.textContent = 'build ' + (ASSET.build || 'dev');
+  })();
+
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    // WebRTC multiplayer: signaling defaults to this site's own /signal endpoint
+    // (a Cloudflare Worker + Durable Object; see worker/signal.js).  Game traffic
+    // is peer-to-peer over WebRTC DataChannels with public STUN.
+    //   ?signal=wss://host/path  overrides the signaling endpoint
+    //   ?room=12345678           fixes the host's room code (8-digit numeric)
+    //   ?join=12345678           pre-fills the Room ID to join (invite links)
+    //   ?host=1&name=X           hosts a room directly (deeplink.js -> -server)
+    //
+    // ?aud=dev rides along when this browser is tagged as the maintainer's (the
+    // sticky ?metrics=dev audience), so the room counter can drop QA rooms the
+    // way /metric already drops QA visits.  It has to go on the URL rather than
+    // in the {t:'host'} message: the game channel's messages are built by the
+    // engine in C++, so the socket URL is the only seam both channels share.
+    // Never appended to a ?signal= override -- that endpoint is someone else's.
+    ysfwSignalUrl: new URLSearchParams(location.search).get('signal') ||
+      ((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/signal' +
+        ((globalThis.ysfwMetrics && globalThis.ysfwMetrics.audience === 'dev') ? '?aud=dev' : '')),
+    ysfwRoomCode: new URLSearchParams(location.search).get('room') || undefined,
+    ysfwJoinRoom: new URLSearchParams(location.search).get('join') || undefined,
+    locateFile: function (path) {
+      if (path === 'ysflight32_gl2.wasm') return ASSET.wasm;
+      if (path === 'ysflight32_gl2.data') return ASSET.data;
+      return path;
+    },
+    // Deep link (?freeflight= / ?endurance= / ?replay= / ?lang=) → engine argv.
+    // The mapping lives in deeplink.js (classic script above) so it is unit-
+    // testable; see docs/web-shell.md for the entry contract.
+    arguments: globalThis.ysfwDeepLink.buildEngineArgs(location.search),
+    preRun: [function () {
+      // Let YSFLIGHT's locale detection see the browser language.
+      try {
+        Module.ENV.LANG = (navigator.language || 'en').replace('-', '_') + '.UTF-8';
+      } catch (e) {}
+      // Persist user config (/home/web_user/Documents) in IndexedDB.
+      var FS = Module.FS, IDBFS = Module.IDBFS;
+      try { FS.mkdir('/home/web_user/Documents'); } catch (e) {}
+      FS.mount(IDBFS, {}, '/home/web_user/Documents');
+      Module.addRunDependency('idbfs-load');
+      FS.syncfs(true, function (idbfsLoadErr) {
+        // Diagnostic: a silently-swallowed load error here means persisted config
+        // never comes back on reload.  Logged so a "settings don't save" report can
+        // be pinned to load vs. save vs. wrong-path (the engine also prints its
+        // resolved "User YSFLIGHT Dir=" / "YSFLIGHT Config Dir=").
+        if (idbfsLoadErr) console.error('[idbfs] load failed: ' + (idbfsLoadErr.message || idbfsLoadErr));
+        else console.log('[idbfs] load ok');
+        // Pre-boot add-on pack management.  Hold a run dependency so the engine's
+        // one-time template scan (a few frames into main) runs only after packs
+        // are in place — no reload needed.  Three flows:
+        //   manual launch -> hold the gate, show the pack panel, release on play
+        //   ?join=<room>  -> hold the gate, sync the host's packs P2P, release (M6)
+        //   ?freeflight   -> boot straight in (no host to sync from)
+        var gateReleased = false;
+        function releaseGate() {
+          if (gateReleased) return;
+          if (Module.__ysfwGateHeld) {
+            Module.removeRunDependency('ysfw-packs');
+            Module.__ysfwGateHeld = false;
+          }
+          gateReleased = true;
+        }
+        // packs-ui.js / pack-net.js are deferred <script type="module">.  On a WARM
+        // cache the engine (.data/.wasm cache-hit) can run THIS preRun BEFORE those
+        // modules execute and publish window.ysfwPacks / ysfwPacksInit / ysfwPackNet,
+        // so the pre-boot materialize and join-sync below would silently no-op and the
+        // engine would boot with NO packs — a returning joiner gets none of the host's
+        // add-ons ("host fine, clients get no packs", which is exactly the symptom this
+        // branch chased).  The boot gate is already held here, so wait (briefly,
+        // bounded) for the module to publish its API before using it.  Cold loads
+        // (slow .data download) always win the race; this only closes the warm path.
+        function whenModule(test, timeoutMs) {
+          if (test()) return Promise.resolve(true);
+          return new Promise(function (resolve) {
+            var waited = 0, step = 30, cap = timeoutMs || 8000;
+            var iv = setInterval(function () {
+              if (test()) { clearInterval(iv); resolve(true); }
+              else if ((waited += step) >= cap) { clearInterval(iv); resolve(false); }
+            }, step);
+          });
+        }
+        function initPackUi() {
+          whenModule(function () { return window.ysfwPacksInit; }).then(function (ok) { if (ok) { try { window.ysfwPacksInit(); } catch (e) {} } });
+          whenModule(function () { return window.ysfwReplaysInit; }).then(function (ok) { if (ok) { try { window.ysfwReplaysInit(); } catch (e) {} } });
+        }
+        try {
+          var q = new URLSearchParams(location.search);
+          var joinRoom = Module.ysfwJoinRoom;
+          var freeflight = q.get('freeflight');
+          var replay = q.get('replay');
+          var directBoot = globalThis.ysfwDeepLink.isDirectBoot(q);
+          var kind = globalThis.ysfwDeepLink.deepLinkKind(q);
+          // v1 スコープ: ホスト→joiner の「追加パック配信(同期)」は一旦スコープ外。
+          // 同期パス(Option A/B・メタ束・必須ゲート・Retry/Soloパネル)は既定で無効化し、
+          // joiner は -client のまま即ブートして base＋自分のローカル取り込みパックだけで
+          // ホストに接続する(vanilla YSFLIGHT と同じ「事前に同じ物を入れておく」契約)。
+          // ?packsync=1 で再有効化 — v2 で配信を再設計するときのテスト用スイッチ。
+          // 注: ローカルパックの materialize(ソロ取り込み)は別経路で下に残してある。
+          var MP_PACK_SYNC = /[?&]packsync=1\b/.test(location.search);
+          Module.__ysfwUserDir = '/home/web_user/Documents/YSFLIGHT.COM/YSFLIGHT';
+          try { FS.mkdirTree(Module.__ysfwUserDir); } catch (e) {}
+          // Web-shell rule: a deep-link boot must reach flight with ZERO engine
+          // dialogs.  On a truly first visit the engine would pop its first-start
+          // dialog, which stalls the takeoff behind a modal.  Pre-seed the marker
+          // the engine itself writes on first start (a file named after
+          // YSFLIGHT_VERSION in the common YSFLIGHT dir — fsmain.cpp /
+          // FsGetFirstStartFile; 20181124 is fsdef.h's YSFLIGHT_VERSION, frozen
+          // upstream).  Safe to skip the dialog's other work: default control
+          // assignments come from the FsControlAssignment CONSTRUCTOR (a missing
+          // control file keeps them), and MergeDefaultControl only upgrades an
+          // existing user control file.  The one real side effect — creating the
+          // net-chat-log dir — is replicated here.  Manual (pack-panel) boots keep
+          // the engine's own first-start flow.
+          if (directBoot) {
+            try {
+              var marker = Module.__ysfwUserDir + '/20181124';
+              if (!FS.analyzePath(marker).exists) FS.writeFile(marker, 'YS\n');
+              FS.mkdirTree(Module.__ysfwUserDir + '/netchatlog');
+              // Second pre-flight modal: the no-joystick warning
+              // (Sim_Fly_MissionGoalDone -> StartNoJoystickWarningDialog) stalls
+              // gamepad-less deep-link takeoffs the same way.  Suppressing it is
+              // safe: the actual mouse-as-stick fallback is applied by
+              // CheckJoystickAssignmentAndFixIfNecessary regardless of the
+              // dialog.  flight.cfg is line-per-key with constructor defaults
+              // for absent keys, so a one-line seed only flips the warning; an
+              // EXISTING flight.cfg is the user's own and is left alone.
+              var cfgDir = Module.__ysfwUserDir + '/config';
+              FS.mkdirTree(cfgDir);
+              if (!FS.analyzePath(cfgDir + '/flight.cfg').exists) {
+                FS.writeFile(cfgDir + '/flight.cfg', 'JSWARNING FALSE\n');
+              }
+              // Create-Flight: the page stored a spec in sessionStorage and
+              // navigated here with ?createflight=1; -flyyfs points at
+              // __createflight.yfs.  Generate that file now (before main reads
+              // it) from the spec.  A bad/absent spec leaves no file, so the
+              // engine's -flyyfs simply finds nothing and the -autoexit path
+              // returns to the shell rather than hanging.
+              if (kind === 'createflight') {
+                try {
+                  var raw = sessionStorage.getItem('ysfwCreateFlight');
+                  if (raw) {
+                    var yfs = globalThis.ysfwYfs.buildYfs(JSON.parse(raw));
+                    FS.writeFile(Module.__ysfwUserDir + '/__createflight.yfs', yfs);
+                  }
+                } catch (e) { console.error('[createflight] ' + (e && e.message ? e.message : e)); }
+              } else if (kind === 'mission') {
+                // ?mission=racing|cas: a BUILT-IN spec (yfs.js missionSpec)
+                // instead of a sessionStorage one — shareable URLs, same
+                // generated-file path as Create Flight.
+                try {
+                  var mspec = globalThis.ysfwYfs.missionSpec(q.get('mission'));
+                  if (mspec) {
+                    FS.writeFile(Module.__ysfwUserDir + '/__createflight.yfs', globalThis.ysfwYfs.buildYfs(mspec));
+                  }
+                } catch (e) { console.error('[mission] ' + (e && e.message ? e.message : e)); }
+              } else if (kind === 'openyfs' || kind === 'openreplay') {
+                // ?openyfs=1 / ?openreplay=1: the top page stored a
+                // user-picked .yfs; write it for -flyyfs / -replayrecord
+                // (record-carrying files auto-route to replay).  A bad/absent
+                // file leaves nothing to run and -autoexit hands back.
+                try {
+                  var yraw = sessionStorage.getItem('ysfwOpenYfs');
+                  if (yraw) FS.writeFile(Module.__ysfwUserDir + '/__openflight.yfs', yraw);
+                } catch (e) { console.error('[openyfs] ' + (e && e.message ? e.message : e)); }
+              }
+            } catch (e) {}
+          }
+          // Settings: the web Settings page owns a curated set of flight.cfg
+          // options in localStorage; merge them into the engine's flight.cfg on
+          // EVERY boot (manual and deep-link) so the engine reads them normally.
+          // Non-managed lines (engine-written, or options not yet exposed) are
+          // preserved — see web/settings.js mergeFlightCfg.
+          try {
+            var sraw = localStorage.getItem('ysfwSettings');
+            if (sraw && globalThis.ysfwSettings) {
+              var sVals = globalThis.ysfwSettings.normalize(JSON.parse(sraw));
+              var sDir = Module.__ysfwUserDir + '/config';
+              FS.mkdirTree(sDir);
+              var cfgPath = sDir + '/flight.cfg';
+              var cur = FS.analyzePath(cfgPath).exists ? FS.readFile(cfgPath, { encoding: 'utf8' }) : '';
+              FS.writeFile(cfgPath, globalThis.ysfwSettings.mergeFlightCfg(cur, sVals));
+            }
+          } catch (e) { console.error('[settings] ' + (e && e.message ? e.message : e)); }
+          // Controls: merge the web-owned GAMEPAD assignments into the
+          // engine's ctlassign.cfg (web/controls.js).  The file also holds
+          // keyboard/mouse lines the web must not lose (a partial file would
+          // wipe them: the engine's Load replaces everything the moment the
+          // file opens), so a missing file is merged into the synthesized
+          // engine-default map instead.
+          try {
+            var craw = localStorage.getItem('ysfwControls');
+            if (craw && globalThis.ysfwControls) {
+              var cPath = Module.__ysfwUserDir + '/config/ctlassign.cfg';
+              var cCur = FS.analyzePath(cPath).exists ? FS.readFile(cPath, { encoding: 'utf8' }) : null;
+              var cOut = globalThis.ysfwControls.mergeCtlAssign(cCur, JSON.parse(craw));
+              if (cOut != null) FS.writeFile(cPath, cOut);
+            }
+          } catch (e) { console.error('[controls] ' + (e && e.message ? e.message : e)); }
+          // Path A pack storage: payload lives in OPFS (on disk, deduped).  Mount
+          // MEMFS on the user dir's packs/ so materialized payload is ephemeral and
+          // is NOT written to IndexedDB by the periodic syncfs.  Then materialize
+          // every enabled pack from OPFS before main()'s template scan, gated by a
+          // run dependency so the engine waits for the payload to be in place.
+          try { FS.mkdirTree(Module.__ysfwUserDir + '/packs'); } catch (e) {}
+          try { FS.mount(FS.filesystems.MEMFS, {}, Module.__ysfwUserDir + '/packs'); } catch (e) {}
+          Module.addRunDependency('ysfw-materialize');
+          // Backstop: materializeEnabled only copies lightweight metadata (no budget,
+          // no heavy payload) so it should not hang, but never let a stuck/slow
+          // materialize block the boot forever (the panel
+          // and join-sync have their own backstops; this closes the same hole here).
+          var matDone = false;
+          function finishMaterialize() { if (matDone) return; matDone = true; Module.removeRunDependency('ysfw-materialize'); }
+          var matBackstop = setTimeout(function () {
+            console.error('[packs] materialize backstop (90s) — releasing boot gate; some packs may be missing');
+            finishMaterialize();
+          }, 90000);
+          // Progress on the loading status, but only when nothing else owns the UI
+          // (the pack panel / join-sync set their own text).
+          var matProgress = function (done, total) {
+            if (gateReleased || Module.__ysfwJoinSync) return;
+            if (document.getElementById('ysfw-pack-panel')) return;
+            statusEl.textContent = TXT.materializing(done, total);
+          };
+          whenModule(function () { return window.ysfwPacks && window.ysfwPacks.materializeEnabled; })
+            .then(function (ok) { return ok ? window.ysfwPacks.materializeEnabled(matProgress) : null; })
+            .catch(function (e) { console.warn('[packs] pre-boot materialize: ' + (e && e.message ? e.message : e)); })
+            .then(function () { clearTimeout(matBackstop); finishMaterialize(); });
+          if (joinRoom && MP_PACK_SYNC) {
+            // M6/M7: hold the gate and OBTAIN the host's enabled packs before
+            // main() — Option B (self-fetch each pack's advertised URL) with a
+            // fallback to Option A (host P2P push).  A missing REQUIRED field is
+            // fatal in the engine, so on failure we show an explicit panel
+            // (Retry / play Solo) instead of booting silently into a broken join.
+            Module.addRunDependency('ysfw-packs');
+            Module.__ysfwGateHeld = true;
+            Module.__ysfwJoinSync = true;
+            window.__ysfwFsReady = true;
+            initPackUi();
+            // Solo = abandon the join: drop the -client args (set by the join IIFE
+            // below) so the engine boots single-player rather than connecting to a
+            // host whose required field we could not obtain, then release the gate.
+            // Safe to mutate Module.arguments here: main() has not run (gate held).
+            function bootSolo() {
+              try {
+                var ci = Module.arguments.indexOf('-client');
+                if (ci >= 0) Module.arguments = Module.arguments.slice(0, ci);
+              } catch (e) {}
+              releaseGate();
+            }
+            // Re-runnable so the obtain-failure panel's "Retry" can try again (M7).
+            function runJoinSync() {
+              // Show live sync activity instead of a frozen "loading…" bar (the sync
+              // can run up to the 90s backstop).  Set it HERE — inside preRun, after
+              // the .data download, where Emscripten's setStatus has gone quiet so it
+              // is not clobbered (in the name-form go() it would be overwritten by the
+              // "Downloading data…" progress).  Writes no-op once the gate releases.
+              if (!gateReleased) statusEl.textContent = TXT.joinSyncing;
+              var onProgress = function (done, total) {
+                if (gateReleased) return;
+                statusEl.textContent = total ? TXT.joinProgress(done, total) : TXT.joinSyncing;
+              };
+              var doSync = whenModule(function () { return window.ysfwPackNet && window.ysfwPackNet.syncAsJoiner && window.ysfwPacks && window.ysfwPacks.list; })
+                .then(function (ok) {
+                  if (gateReleased || !ok) return null;
+                  // Wait (briefly) for /turn so the pack DataChannel is built WITH the
+                  // TURN relay rather than STUN-only — a restrictive-NAT (mobile/CGNAT)
+                  // joiner otherwise can't reach the host and times out with zero packs.
+                  // Cap the wait so a dead/slow /turn never delays boot past the sync's
+                  // own 30s legs; if it lands later, Retry rebuilds the PCs with it.
+                  var turnGate = Promise.race([
+                    window.__ysfwTurnReady || Promise.resolve(),
+                    new Promise(function (res) { setTimeout(res, 8000); })
+                  ]);
+                  return turnGate.then(function () { return window.ysfwPackNet.syncAsJoiner(joinRoom, onProgress); });
+                });
+              return doSync.then(function (r) {
+                // If the gate already went (backstop fired, or the user chose Solo
+                // on a prior attempt), a late-resolving sync must not pop a panel
+                // over an already-booting engine.
+                if (gateReleased) return;
+                if (r) console.log('[pack-net join] pre-boot sync: ' + JSON.stringify(r));
+                if (r && r.requiredFailed && r.requiredFailed.length &&
+                    window.ysfwPacks && window.ysfwPacks.showJoinFailure) {
+                  window.ysfwPacks.showJoinFailure(r.requiredFailed, { onRetry: runJoinSync, onSolo: bootSolo });
+                  return;
+                }
+                releaseGate();
+              }, function (e) {
+                if (gateReleased) return;
+                console.warn('[pack-net join] pre-boot sync failed: ' + (e && e.message ? e.message : e));
+                // An unexpected error is still an obtain failure — surface the UX,
+                // never hang the boot silently.
+                if (window.ysfwPacks && window.ysfwPacks.showJoinFailure) {
+                  window.ysfwPacks.showJoinFailure([{ id: '', name: TXT.syncError, categories: [] }], { onRetry: runJoinSync, onSolo: bootSolo });
+                } else {
+                  releaseGate();
+                }
+              });
+            }
+            // Absolute backstop: every sync leg has its own timeout, but if the
+            // machinery somehow never resolves AND no decision panel is up, boot
+            // SOLO rather than hang forever — never silently enter a -client join
+            // whose pack sync never finished (when the panel is up, the user drives
+            // it, so this stays a no-op then).
+            setTimeout(function () {
+              if (!gateReleased && !Module.__ysfwJoinFailureShown) bootSolo();
+            }, 90000);
+            runJoinSync();
+          } else if (!joinRoom && !directBoot) {
+            // Manual launch: show the pack panel; packs-ui.js releases on "play".
+            Module.addRunDependency('ysfw-packs');
+            Module.__ysfwGateHeld = true;
+            // Safety net: if packs-ui.js failed to load, never hang the boot.
+            setTimeout(function () {
+              if (Module.__ysfwGateHeld && !Module.__ysfwPanelShown) releaseGate();
+            }, 5000);
+            window.__ysfwFsReady = true;
+            initPackUi();
+          } else {
+            // A deep link (freeflight / endurance / replay) OR a join with pack-sync
+            // descoped (MP_PACK_SYNC off): boot straight in (no gate).  A joiner keeps its -client args and
+            // connects to the host on base + locally-imported packs only.  For a
+            // freeflight,
+            // remember the launched triple so the top page can offer a one-tap "Fly
+            // again" next visit (read in packs-ui renderPanel, gated there to bundled
+            // renderPanel, gated there to bundled presets so it never deep-links into
+            // an uninstalled add-on).  Storage may throw (private mode) -> guard.
+            try { if (freeflight) localStorage.setItem('ysfwLastFlight', freeflight); } catch (e) {}
+            window.__ysfwFsReady = true;
+            initPackUi();
+          }
+        } catch (e) {
+          releaseGate();
+        }
+        // Release idbfs-load LAST so the run-dependency count never transiently
+        // hits 0 above — otherwise a cached/instant .data preload lets Emscripten
+        // schedule run()/callMain before the gate is added, aborting with
+        // "cannot call main when async dependencies remain".
+        Module.removeRunDependency('idbfs-load');
+      });
+    }],
+    setStatus: function (text) {
+      if (booted) return;
+      var m = text.match(/([^(]+)\((\d+(\.\d+)?)\/(\d+)\)/);
+      if (m) {
+        var pct = 100 * parseFloat(m[2]) / parseFloat(m[4]);
+        bar.style.width = pct + '%';
+        if (progressEl) progressEl.setAttribute('aria-valuenow', Math.round(pct));
+        statusEl.textContent = m[1].trim();
+      } else {
+        statusEl.textContent = text || '';
+      }
+    },
+    onRuntimeInitialized: function () {
+      booted = true;
+      overlay.classList.add('hidden');
+      // If some enabled packs failed to materialize (parse error, not a capacity
+      // limit -- there is no boot-time budget since lazy-pack landed), tell the user
+      // which ones and why (a dismissible banner, not a silent drop).
+      try {
+        var sk = window.__ysfwMaterializeSkipped;
+        if (sk && sk.length) {
+          var names = sk.map(function (s) { return s.name || s.id; }).join(', ');
+          var n = document.createElement('div');
+          n.style.cssText = 'position:fixed;left:50%;top:8px;transform:translateX(-50%);z-index:100000;max-width:min(560px,92vw);' +
+            'background:rgba(20,14,8,.95);border:1px solid #5a4a2a;border-radius:8px;padding:10px 14px;color:#e6d8b8;font-size:12.5px;line-height:1.5;cursor:pointer';
+          n.textContent = '⚠ ' + TXT.packsSkipped(sk.length, names);
+          n.title = names;
+          n.onclick = function () { if (n.parentNode) n.remove(); };
+          document.body.appendChild(n);
+          setTimeout(function () { if (n.parentNode) n.remove(); }, 15000);
+        }
+      } catch (e) {}
+      // Persist /home/web_user/Documents to IndexedDB.  Guard against
+      // overlapping syncfs calls (interval + visibilitychange/beforeunload, or a
+      // slow write): a second syncfs while one is in flight is wasted work and
+      // triggers emscripten's "N FS.syncfs operations in flight" warning.
+      var syncing = false;
+      var flushLogged = false;
+      var flush = function () {
+        if (syncing) return;
+        syncing = true;
+        try {
+          Module.FS.syncfs(false, function (err) {
+            syncing = false;
+            // Diagnostic: a save error (e.g. QuotaExceededError when the MEMFS-mounted
+            // packs/ tree gets walked into the IndexedDB write) means NOTHING in the
+            // Documents tree is persisted — config included.  Log the first outcome so
+            // a "settings don't save" report is decisive; errors always log.
+            if (err) console.error('[idbfs] flush failed: ' + (err.message || err));
+            else if (!flushLogged) { flushLogged = true; console.log('[idbfs] flush ok'); }
+          });
+        } catch (e) { syncing = false; console.error('[idbfs] flush threw: ' + (e && e.message ? e.message : e)); }
+      };
+      setInterval(flush, 10000);
+      window.addEventListener('visibilitychange', flush);
+      window.addEventListener('beforeunload', flush);
+      // Native settings (graphics flight.cfg / screen option.cfg / key+joystick
+      // ctlassign.cfg) are written by the engine the instant the user hits OK in
+      // a config dialog -- via fopen/fwrite/fclose, i.e. FS.close.  Those writes
+      // land only in the in-memory FS; the IDBFS round-trip itself is healthy
+      // (verified), but without an explicit syncfs the bytes are lost when the
+      // user reloads / closes the tab (or a mobile tab is frozen) before the 10s
+      // interval flush.  The visibilitychange/beforeunload flush above fires too
+      // late: syncfs is async and does not complete before the page is torn
+      // down.  So persist proactively -- when a *writable* file under the
+      // IDBFS-mounted Documents tree is closed, schedule a debounced flush.
+      var origClose = Module.FS.close.bind(Module.FS);
+      var closeFlushTimer = null;
+      Module.FS.close = function (stream) {
+        var r = origClose(stream);
+        try {
+          if (stream && (stream.flags & 3) !== 0) {            // O_WRONLY | O_RDWR (read-only closes ignored)
+            var p = stream.path || '';
+            if (p.lastIndexOf('/home/web_user/Documents/', 0) === 0 &&
+                p.indexOf('/packs/') < 0) {                    // packs/ is MEMFS, never persisted to IndexedDB
+              clearTimeout(closeFlushTimer);
+              closeFlushTimer = setTimeout(flush, 800);        // debounce: OK writes 3 cfg files in a burst
+            }
+          }
+        } catch (e) {}
+        return r;
+      };
+    },
+    print: function (text) { console.log(text); },
+    printErr: (function () {
+      // YSFLIGHT's startup shader check prints a benign "Cannot find uniform
+      // location ... Could be normal" triplet for uniforms that the GLSL
+      // compiler optimized out.  Keep the console readable by default;
+      // ?verbose=1 shows everything.
+      var verbose = new URLSearchParams(location.search).get('verbose');
+      var benign = /^(Called from YsGLSL|Cannot find uniform location|Could be normal since error check|warning: unsupported syscall: __syscall_setsockopt)/;
+      return function (text) {
+        if (!verbose && benign.test(text)) return;
+        console.warn(text);
+      };
+    })()
+  };
+
+  // TURN: fetch short-lived ICE servers (Cloudflare Realtime TURN, minted by the
+  // Worker's /turn endpoint) so peers behind symmetric NAT / CGNAT can relay when
+  // direct P2P fails — otherwise a cross-machine joiner never receives the host's
+  // game state and the aircraft list is empty.  Fired at load so the creds are
+  // ready before the user hosts/joins.  The engine game channel reads
+  // Module.ysfwIceServers (yssocket) and the pack channel reads window.ysfwPackIce
+  // (pack-net.js); both fall back to public STUN if /turn is unconfigured (204) or
+  // unreachable.  ?turn=0 forces STUN-only (to reproduce the no-TURN behaviour).
+  (function () {
+    if (new URLSearchParams(location.search).get('turn') === '0') return;
+    try {
+      // Expose the mint as a promise so the pre-boot JOIN sync can wait for it before
+      // building the pack DataChannel — otherwise a warm-cache joiner races ahead and
+      // connects STUN-only (no relay), stranding restrictive-NAT peers (see runJoinSync).
+      window.__ysfwTurnReady = fetch('/turn', { method: 'POST' })
+        .then(function (r) {
+          if (r.ok) return r.json();
+          // 204 = TURN secrets unset (graceful STUN-only); 502 = upstream mint failed.
+          // Either way there is NO relay, so symmetric-NAT/CGNAT peers can't connect or
+          // sync packs.  Warn so a deploy that forgot TURN_KEY_ID/TURN_API_TOKEN is
+          // greppable in the Workers logs instead of failing silently for those users.
+          console.warn('[turn] no ICE relay (HTTP ' + r.status + ') — STUN-only; restrictive networks (mobile/CGNAT) will fail to connect/sync. Set TURN_KEY_ID + TURN_API_TOKEN to enable a relay.');
+          return null;
+        })
+        .then(function (d) {
+          if (d && Array.isArray(d.iceServers) && d.iceServers.length) {
+            Module.ysfwIceServers = d.iceServers;
+            window.ysfwPackIce = d.iceServers;
+            console.log('[turn] ICE relay ready (' + d.iceServers.length + ' server group(s))');
+          }
+        })
+        .catch(function () { console.warn('[turn] /turn fetch failed — STUN-only fallback'); });
+    } catch (e) {}
+  })();
+
+  window.addEventListener('error', function (e) {
+    if (!booted) statusEl.textContent = 'Error: ' + e.message;
+  });
+
+  // PWA: cache the app for instant reload and offline play.
+  //
+  // Update notification: sw.js skipWaiting()s and the HTML is served
+  // network-first, so a RELOAD always picks up a new deploy -- but a long-lived
+  // tab never learns one happened.  In multiplayer that silently leaves one
+  // player on an old build (real incident: a joiner's stale client could not
+  // use a pack field until a hard reload).  So: check for updates periodically
+  // and when the tab becomes visible, and when a new worker takes over show a
+  // small reload chip.  Never auto-reload -- the player may be mid-flight.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').then(function (reg) {
+        // Only a page that ALREADY had a controller is seeing an update
+        // (first-ever install also fires updatefound; no chip for that).
+        var hadController = !!navigator.serviceWorker.controller;
+        function showUpdateChip() {
+          if (!hadController || document.getElementById('ysfw-update-chip')) return;
+          var ja = ((document.documentElement.lang || navigator.language || '') + '').toLowerCase().indexOf('ja') === 0;
+          var chip = document.createElement('div');
+          chip.id = 'ysfw-update-chip';
+          chip.textContent = ja ? '新しいバージョンがあります — タップで更新' : 'Update available — tap to reload';
+          chip.style.cssText = 'position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:10000;' +
+            'background:rgba(30,90,180,.92);color:#fff;padding:9px 16px;border-radius:8px;' +
+            'font:14px system-ui,sans-serif;cursor:pointer;user-select:none;box-shadow:0 2px 10px rgba(0,0,0,.4)';
+          chip.onclick = function () { location.reload(); };
+          document.body.appendChild(chip);
+        }
+        if (reg.waiting) showUpdateChip();
+        reg.addEventListener('updatefound', function () {
+          var w = reg.installing;
+          if (!w) return;
+          w.addEventListener('statechange', function () {
+            if (w.state === 'activated' || w.state === 'waiting') showUpdateChip();
+          });
+        });
+        function checkForUpdate() { try { reg.update().catch(function () {}); } catch (e) {} }
+        setInterval(checkForUpdate, 60 * 60 * 1000);
+        document.addEventListener('visibilitychange', function () {
+          if (document.visibilityState === 'visible') checkForUpdate();
+        });
+      }).catch(function () {});
+    });
+  }
+
+  // ---- WebGL state shadow ---------------------------------------------------
+  // The engine (ysgl) brackets nearly every draw with save/restore state
+  // queries: YsGLSLUse3DRenderer reads GL_CURRENT_PROGRAM on EVERY renderer
+  // activation (1-4 per shell node per frame, ysglsl3ddrawing.c:860) and
+  // YsHasShellExtVboSet::Render reads GL_FRONT_FACE once per node
+  // (ysshellextgl_gl2.cpp:40), plus viewport/blend-func reads elsewhere
+  // (fsopengl2.0.cpp, fsparticlegl2.0.cpp, ysglslplain2ddrawing.c).  In
+  // WebGL, getParameter is a synchronous round trip toward the GPU process
+  // -- profiled at ~78% of ALL engine CPU time in VR (docs/perf-vr-72hz.md).
+  // Shadow the handful of states the engine actually queries: record them in
+  // the setter wrappers, answer those getParameter enums from the shadow.
+  // Every other pname falls through to the real getParameter untouched.
+  // (Correct because ALL writes to these states go through the same wrapped
+  // methods, whoever the caller is; the engine only ever uses sane viewport/
+  // blend arguments, so GL's clamp/invalid-arg edge cases don't diverge.)
+  (function () {
+    function installShadow(gl) {
+      if (gl.__ysfwStateShadow) return;
+      gl.__ysfwStateShadow = true;
+      var st = {
+        program: null,
+        frontFace: 0x0901, // GL_CCW -- the GL default
+        viewport: [0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight], // GL default at creation
+        srcRGB: 1, dstRGB: 0, srcA: 1, dstA: 0 // GL_ONE / GL_ZERO defaults
+      };
+      var useProgram = gl.useProgram, frontFace = gl.frontFace,
+          viewport = gl.viewport, blendFunc = gl.blendFunc,
+          blendFuncSeparate = gl.blendFuncSeparate, getParameter = gl.getParameter;
+      gl.useProgram = function (p) { st.program = p || null; return useProgram.call(this, p); };
+      gl.frontFace = function (m) { st.frontFace = m; return frontFace.call(this, m); };
+      gl.viewport = function (x, y, w, h) { st.viewport = [x | 0, y | 0, w | 0, h | 0]; return viewport.call(this, x, y, w, h); };
+      gl.blendFunc = function (s, d) { st.srcRGB = st.srcA = s; st.dstRGB = st.dstA = d; return blendFunc.call(this, s, d); };
+      gl.blendFuncSeparate = function (sr, dr, sa, da) { st.srcRGB = sr; st.dstRGB = dr; st.srcA = sa; st.dstA = da; return blendFuncSeparate.call(this, sr, dr, sa, da); };
+      gl.getParameter = function (pname) {
+        switch (pname) {
+          case 0x8B8D: return st.program;                 // CURRENT_PROGRAM (emscripten's glue maps the object back to its GL id)
+          case 0x0B46: return st.frontFace;               // FRONT_FACE
+          case 0x0BA2: return new Int32Array(st.viewport); // VIEWPORT -- fresh copy, like the real call
+          case 0x80C9: return st.srcRGB;                  // BLEND_SRC_RGB
+          case 0x80C8: return st.dstRGB;                  // BLEND_DST_RGB
+          case 0x80CB: return st.srcA;                    // BLEND_SRC_ALPHA
+          case 0x80CA: return st.dstA;                    // BLEND_DST_ALPHA
+        }
+        return getParameter.call(this, pname);
+      };
+    }
+    var getCtx = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+      var ctx = getCtx.call(this, type, attrs);
+      if (ctx && ('webgl2' === type || 'webgl' === type || 'experimental-webgl' === type)) installShadow(ctx);
+      return ctx;
+    };
+  })();
+
+  function loadEngine() {
+    var s = document.createElement('script');
+    s.async = true;
+    s.src = ASSET.js;
+    document.body.appendChild(s);
+  }
+
+  // ---- Bottom-right control row --------------------------------------------
+  // ONE right-aligned HORIZONTAL row pinned to the bottom-right corner, so all the
+  // shell controls line up on a single line instead of being scattered (was: help
+  // bottom-left, Room chip top-right) or stacked.  Left-to-right by CSS `order`:
+  //   order 0 : Room chip (hosting) / connection badge (menu) -- MUTUALLY EXCLUSIVE,
+  //             so they share the leftmost slot and never both show
+  //   order 1 : "? ヘルプ" help button
+  //   order 2 : "⛶ 全画面" fullscreen button (right end = the corner)
+  // The row's right edge is pinned (right:8px) and it grows leftward, so the
+  // rightmost item (fullscreen) holds the corner while items to its left appear/
+  // disappear with no position jump.  align-items:flex-end keeps unequal-height
+  // items on a common bottom; order fixes left/right independent of which IIFE
+  // appends each child.  The container is click-through (pointer-events:none,
+  // re-enabled per child) so the gaps don't swallow canvas clicks.
+  function ysfwBRStack() {
+    var s = document.getElementById('ysfw-br-stack');
+    if (s) return s;
+    s = document.createElement('div');
+    s.id = 'ysfw-br-stack';
+    s.style.cssText = 'position:fixed;right:8px;bottom:8px;z-index:99999;display:flex;flex-direction:row;align-items:flex-end;gap:6px;pointer-events:none';
+    document.body.appendChild(s);
+    return s;
+  }
+
+  // ---- On-screen multiplayer UI: connection badge + invite link ------------
+  // Three states, driven by globalThis.ysfwInFlight (set by the engine's
+  // ChangeRunMode) and globalThis.ysfwRtc.host (set while this browser hosts):
+  //   - menu (not flying)        -> connection badge only
+  //   - hosting a server         -> clickable Room ID chip (click = copy invite)
+  //   - flying as client / solo  -> nothing
+  (function () {
+    // Room ID chip (shown only while hosting): the Room ID itself is the copy
+    // control — hover shows a pointer cursor, a 📋 icon hints it is clickable,
+    // and clicking copies the invite link /?join=<room>.  It replaces (and
+    // hides) the engine's #ysfw-room-overlay.
+    var chip = null;
+    // Pin the live Room ID into the URL (?room=<code>) the moment we start hosting,
+    // so a full page reload re-hosts the SAME code and previously-shared invite
+    // links (/?join=<code>) keep working.  Without this the host mints a fresh
+    // random code on every (re)host, silently killing old links — one half of the
+    // "after a while, players can't rejoin" report (the other half is the signaling
+    // reconnect in yssocket/pack-net).  One-shot; preserves any other query params.
+    var roomPinned = false;
+    function pinRoomUrl(code) {
+      if (roomPinned || !code) return;
+      roomPinned = true;
+      try {
+        var u = new URL(location.href);
+        if (u.searchParams.get('room') !== code) {
+          u.searchParams.set('room', code);
+          history.replaceState(history.state, '', u.toString());
+        }
+        Module.ysfwRoomCode = code; // keep any later read in sync
+      } catch (e) {}
+    }
+    function ensureChip() {
+      if (chip) return chip;
+      chip = document.createElement('div');
+      chip.id = 'ysfw-room-chip';
+      // Leftmost slot (order:0) of the bottom-right row, shared with the connection
+      // badge (mutually exclusive: chip only while hosting, badge only in the menu).
+      chip.style.cssText = 'order:0;pointer-events:auto;background:rgba(10,14,20,.85);color:#cfd8e3;padding:8px 14px;border-radius:6px;font:14px monospace;cursor:pointer;user-select:none;display:none';
+      chip.title = TXT.chipCopyTitle;
+      chip.onclick = function () {
+        var R = globalThis.ysfwRtc;
+        var code = (R && R.host && R.host.room) || Module.ysfwRoomCode;
+        if (!code) return;
+        var url = location.origin + '/?join=' + code;
+        var done = function () {
+          chip._copied = true;
+          chip.textContent = TXT.chipCopied;
+          setTimeout(function () { chip._copied = false; }, 1600);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(url).then(done, done);
+        } else {
+          var ta = document.createElement('textarea');
+          ta.value = url; document.body.appendChild(ta); ta.select();
+          try { document.execCommand('copy'); } catch (e) {}
+          ta.remove(); done();
+        }
+      };
+      ysfwBRStack().appendChild(chip);
+      return chip;
+    }
+    function renderChip(code, connecting) {
+      var c = ensureChip();
+      if (c._copied) return;  // keep the "copied" confirmation visible briefly
+      c.textContent = 'Room: ' + code + (connecting ? TXT.connecting + '📋' : '  📋');
+    }
+
+    // Connection badge: a one-shot STUN probe hinting whether direct P2P is
+    // likely.  Same mapped port from two STUN servers => cone NAT (P2P OK);
+    // different ports => symmetric NAT (a TURN relay would be needed).
+    var badge = null, checkState = 'idle';
+    function ensureBadge() {
+      if (badge) return badge;
+      badge = document.createElement('button');
+      badge.id = 'ysfw-conn-badge';
+      // Leftmost slot (order:0) of the bottom-right row.  Shares that slot with the
+      // Room chip, which is fine: the badge shows only in the MENU and the chip only
+      // while HOSTING, so they are never visible at once.  flex lays it out — no more
+      // manual right-edge math (positionBadge is now a no-op).
+      badge.style.cssText = 'order:0;pointer-events:auto;font-size:12px;padding:6px 10px;border-radius:6px;border:1px solid #2a3647;background:#0d141d;color:#cfd8e3;cursor:pointer;display:none';
+      badge.title = TXT.badgeTitle;
+      badge.onclick = function () { if (checkState !== 'running') runCheck(); };
+      ysfwBRStack().appendChild(badge);
+      return badge;
+    }
+    // Park the badge just left of the fullscreen button by measuring that button's
+    // live left edge (its width varies with the localized label).  If the button is
+    // absent (Fullscreen API unsupported -> it is never created) fall back to the
+    // bottom-right corner with the same 8px margin.
+    // No-op: the badge now lays out as a flex child of the bottom-right row, so its
+    // position is automatic.  Kept (callable) so the render loop's call site is
+    // unchanged; ensureBadge() is still needed there to create the element.
+    function positionBadge() { ensureBadge(); }
+    function setBadge(text, title) {
+      var b = ensureBadge();
+      b.textContent = text;
+      if (title) b.title = title;
+    }
+
+    function srflxPort(iceServer, timeoutMs) {
+      return new Promise(function (resolve) {
+        var pc, done = false;
+        var finish = function (p) { if (!done) { done = true; try { pc.close(); } catch (e) {} resolve(p); } };
+        try { pc = new RTCPeerConnection({ iceServers: [{ urls: iceServer }] }); }
+        catch (e) { return resolve(null); }
+        try { pc.createDataChannel('probe'); } catch (e) {}
+        pc.onicecandidate = function (e) {
+          if (!e.candidate) return finish(null);
+          var parts = (e.candidate.candidate || '').split(' ');
+          if (parts[7] === 'srflx') finish(parts[5]); // server-reflexive mapped port
+        };
+        pc.createOffer().then(function (o) { return pc.setLocalDescription(o); }).catch(function () { finish(null); });
+        setTimeout(function () { finish(null); }, timeoutMs || 4000);
+      });
+    }
+    // Is a TURN relay actually available?  The /turn fetch (top of this file)
+    // populates Module.ysfwIceServers / window.ysfwPackIce with the Cloudflare
+    // iceServers; a turn: URL there means even a symmetric-NAT line can relay.
+    function turnAvailable() {
+      var ice = (window.Module && window.Module.ysfwIceServers) || window.ysfwPackIce;
+      return Array.isArray(ice) && JSON.stringify(ice).indexOf('turn:') !== -1;
+    }
+    function runCheck() {
+      checkState = 'running';
+      setBadge(TXT.badgeChecking, TXT.badgeCheckingTitle);
+      Promise.all([
+        srflxPort('stun:stun.l.google.com:19302'),
+        srflxPort('stun:stun1.l.google.com:19302')
+      ]).then(function (ports) {
+        checkState = 'done';
+        if (!ports[0] && !ports[1]) {
+          setBadge(TXT.badgeOffline, TXT.badgeOfflineTitle);
+        } else if (ports[0] && ports[1] && ports[0] !== ports[1]) {
+          // Symmetric NAT: with TURN configured the relay carries it (informational);
+          // without TURN it is the old "may not connect to some peers" warning.
+          if (turnAvailable()) setBadge(TXT.badgeRelay, TXT.badgeRelayTitle);
+          else setBadge(TXT.badgeSymmetric, TXT.badgeSymmetricTitle);
+        } else {
+          setBadge(TXT.badgeDirect, TXT.badgeDirectTitle);
+        }
+      });
+    }
+
+    setInterval(function () {
+      if (!booted) return;
+      var roomEl = document.getElementById('ysfw-room-overlay');
+      var R = globalThis.ysfwRtc;
+      var inFlight = !!globalThis.ysfwInFlight;
+      var host = R && R.host;
+      if (!inFlight) {
+        // MENU: connection badge only.
+        ensureBadge().style.display = 'block';
+        positionBadge();  // ensures the badge exists; layout is handled by the flex row
+        if (checkState === 'idle') runCheck();
+        if (chip) chip.style.display = 'none';
+        if (roomEl) roomEl.style.display = 'none';
+      } else if (host && !host.failed) {
+        // HOSTING: clickable Room ID chip (click to copy invite link); no badge.
+        // The chip replaces the engine overlay, so hide #ysfw-room-overlay.
+        if (badge) badge.style.display = 'none';
+        if (roomEl) roomEl.style.display = 'none';
+        pinRoomUrl(host.room);
+        renderChip(host.room, !host.ok);
+        ensureChip().style.display = 'block';
+      } else if (host && host.failed) {
+        // Host setup failed: show the engine overlay's specific error message.
+        if (badge) badge.style.display = 'none';
+        if (chip) chip.style.display = 'none';
+        if (roomEl) roomEl.style.display = '';
+      } else {
+        // FLYING as client/solo: hide everything.
+        if (badge) badge.style.display = 'none';
+        if (chip) chip.style.display = 'none';
+        if (roomEl) roomEl.style.display = 'none';
+      }
+    }, 800);
+
+    // Resume after a backgrounded/frozen tab: a hidden mobile tab (screen lock,
+    // app switch) freezes JS timers, so the host's keepalive ping stops and its
+    // signaling socket is torn down — the room vanishes for late joiners.  The
+    // engine host (yssocket) and pack host (pack-net) reconnect on their own ws
+    // close, but a frozen tab also froze their backoff timers; on becoming visible
+    // again, kick an immediate reconnect.  (pack-net listens for itself too; this
+    // covers the engine game host, whose reconnect we expose as R.host.reconnect.)
+    function resumeSignaling() {
+      if (document.visibilityState && document.visibilityState !== 'visible') return;
+      var R = globalThis.ysfwRtc;
+      if (R && R.host && R.host.reconnect) { try { R.host.reconnect(); } catch (e) {} }
+    }
+    window.addEventListener('visibilitychange', resumeSignaling);
+    window.addEventListener('pageshow', resumeSignaling);
+  })();
+
+  // ---- Flight deep links: return to the originating page when the flight ends --
+  // ?freeflight= / ?endurance= boot straight into a flight.  The engine reports
+  // flight state through globalThis.ysfwInFlight (set by its ChangeRunMode).
+  // When the user exits the flight back to the engine menu, ysfwInFlight flips
+  // true -> false; we treat that edge as "flight over" and navigate back.  If
+  // ?return=<page> is present and passes the whitelist check we go there;
+  // otherwise we fall back to the clean top-page URL.  Armed only for flight
+  // deep-link launches, so normal in-engine menu navigation after a manual
+  // boot is untouched.  We latch on having actually entered flight first, so the
+  // initial pre-boot false never counts as an exit.
+  //
+  // SECURITY: open-redirect guard — only bare filenames on the explicit whitelist
+  // are accepted.  Any value containing / \ : or .. is rejected regardless.
+  (function () {
+    var q = new URLSearchParams(location.search);
+    var kind = globalThis.ysfwDeepLink.deepLinkKind(q);
+    if (kind !== 'freeflight' && kind !== 'endurance' && kind !== 'intercept' && kind !== 'createflight' && kind !== 'host' && kind !== 'landing' && kind !== 'mission' && kind !== 'retry' && kind !== 'openyfs') return;  // flight deep-links only ('host': server mode counts as in-flight)
+    var RETURN_WHITELIST = ['workbench.html', 'studio-aircraft.html', 'studio-scenery.html', 'studio-pack.html', 'studio-flight.html'];
+    function validateReturnPage(raw) {
+      if (!raw) return null;
+      if (/[/\\:]|\.\./.test(raw)) return null;  // defence-in-depth character check
+      return RETURN_WHITELIST.indexOf(raw.toLowerCase()) !== -1 ? raw : null;
+    }
+    var returnPage = validateReturnPage(q.get('return'));
+    var enteredFlight = false;
+    // The no-joystick mouse-as-stick fallback is non-obvious, so the FIRST time a
+    // Quick Flight actually reaches flight, auto-open the controls legend once on PC
+    // (touch devices get the on-screen pad instead, so skip them).  One-shot via
+    // localStorage; storage may throw (private mode) so guard it like maybeNudge.
+    var coarse = (window.matchMedia && matchMedia('(pointer: coarse)').matches) ||
+      navigator.maxTouchPoints > 0 || ('ontouchstart' in window);
+    function maybeAutoHelp() {
+      if (coarse || !window.__ysfwHelpToggle) return;
+      try { if (localStorage.getItem('ysfwHelpSeen')) return; localStorage.setItem('ysfwHelpSeen', '1'); } catch (e) {}
+      window.__ysfwHelpToggle(true);
+    }
+    var navigated = false;
+    function goBack() {
+      if (navigated) return;
+      navigated = true;
+      var lang = q.get('lang');  // keep an explicit language override across the reload
+      if (returnPage) {
+        // Navigate back to the studio/workbench page that launched this flight.
+        location.assign(location.origin + location.pathname.replace(/[^/]*$/, '') + returnPage + (lang ? '?lang=' + encodeURIComponent(lang) : ''));
+      } else {
+        // Fallback: return to the clean top page.
+        location.assign(location.origin + location.pathname + (lang ? '?lang=' + encodeURIComponent(lang) : ''));
+      }
+    }
+    // Instant handover: deep links carry -autoexit, so "flight over" makes the
+    // engine terminate and the port fires 'ysfw-terminated' BEFORE any menu
+    // frame is drawn.  Navigate right away — no enteredFlight latch here, since
+    // a terminate without ever reaching flight (bad aircraft name etc.) should
+    // also return to the shell rather than strand a frozen canvas.
+    window.addEventListener('ysfw-terminated', goBack);
+    // Fallback: poll the flight flag (pre-autoexit builds, or a missed event).
+    setInterval(function () {
+      if (!booted) return;
+      if (globalThis.ysfwInFlight) { if (!enteredFlight) maybeAutoHelp(); enteredFlight = true; return; }
+      if (!enteredFlight) return;  // still booting into the flight; not an exit yet
+      goBack();
+    }, 800);
+  })();
+
+  // Replay playback: return to the top page when the replay ends, mirroring the Quick
+  // Flight return above.  Driven by globalThis.ysfwReplaying (set by the engine's
+  // ChangeRunMode for YSRUNMODE_REPLAYRECORD).  Armed only for ?replay launches.
+  // NOTE: replay links do not yet carry ?return= (deferred; see fix/fly-return PR).
+  (function () {
+    var q = new URLSearchParams(location.search);
+    if (!q.get('replay') && !q.get('openreplay')) return;  // openreplay: File>Open of a recorded .yfs
+    var entered = false;
+    var navigated = false;
+    function goBack() {
+      if (navigated) return;
+      navigated = true;
+      var lang = q.get('lang');
+      location.assign(location.origin + location.pathname + (lang ? '?lang=' + encodeURIComponent(lang) : ''));
+    }
+    // Instant handover on engine terminate (-autoexit), same as the flight
+    // watcher above.
+    window.addEventListener('ysfw-terminated', goBack);
+    setInterval(function () {
+      if (!booted) return;
+      if (globalThis.ysfwReplaying) { entered = true; return; }
+      if (!entered) return;  // still loading into the replay; not an exit yet
+      goBack();
+    }, 800);
+  })();
+
+  // Fullscreen via keyboard only (no on-screen control): F11 and Ctrl+Cmd+F
+  // toggle the documentElement in/out of fullscreen.  We fullscreen the
+  // documentElement (not just the canvas) so the overlay, Room chip and badge
+  // stay visible inside fullscreen.  The listener is on the CAPTURE phase so it
+  // beats the engine's SDL key handler; we only swallow these two combos and
+  // pass every other key through, so gameplay keys are untouched.  F11 has no
+  // default engine action and Ctrl+Cmd+F is not an engine binding, so claiming
+  // them here is safe.  Browsers grant fullscreen only from a user gesture — a
+  // keydown qualifies; preventDefault on F11 suppresses the browser's own native
+  // fullscreen so we don't double-toggle.  Where the Fullscreen API is
+  // unavailable (e.g. iOS Safari) the keys simply do nothing.
+  (function () {
+    var docEl = document.documentElement;
+    var req = docEl.requestFullscreen || docEl.webkitRequestFullscreen;
+    var exit = document.exitFullscreen || document.webkitExitFullscreen;
+    function fsElement() { return document.fullscreenElement || document.webkitFullscreenElement; }
+    if (!req || !exit) return;  // API unsupported -> keys are no-ops
+    // Keyboard Lock (Chromium): YSFLIGHT uses Esc for menus / leaving a flight, but
+    // the browser reserves Esc to exit fullscreen.  While fullscreen, lock Esc so it
+    // reaches the engine instead; the browser then exits fullscreen only on a LONG
+    // Esc press.  No-op where unsupported (Firefox / Safari) -> there Esc still drops
+    // fullscreen, an unavoidable browser default.  Lock on enter, release on exit.
+    var kb = navigator.keyboard;
+    function syncEscLock() {
+      if (!kb || !kb.lock) return;
+      if (fsElement()) { kb.lock(['Escape']).catch(function () {}); }
+      else { try { kb.unlock(); } catch (e) {} }
+    }
+    document.addEventListener('fullscreenchange', syncEscLock);
+    document.addEventListener('webkitfullscreenchange', syncEscLock);
+    function toggle() {
+      try {
+        if (fsElement()) exit.call(document);
+        else req.call(docEl);
+      } catch (e) {}
+    }
+    window.addEventListener('keydown', function (e) {
+      // While fullscreen, stop Esc from dropping fullscreen so the engine can use it.
+      // Only preventDefault — never stopPropagation — so the engine's own key handler
+      // still receives the Esc.  Pairs with the Keyboard Lock above; long-press Esc
+      // still exits fullscreen.  (On browsers without Keyboard Lock, preventDefault
+      // does not block the fullscreen-exit, so Esc there still leaves fullscreen.)
+      if (fsElement() && (e.key === 'Escape' || e.keyCode === 27)) { e.preventDefault(); return; }
+      var isF11 = e.key === 'F11' || e.keyCode === 122;
+      var isCmdCtrlF = (e.key === 'f' || e.key === 'F' || e.keyCode === 70) && e.ctrlKey && e.metaKey;
+      if (!isF11 && !isCmdCtrlF) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();  // keep the engine's key handler from also seeing it
+      toggle();
+    }, true);
+    // On-screen button so touch / no-keyboard users can toggle too.  Bottom-RIGHT
+    // mirrors the controls-legend button (bottom-left) with the same 8px margin.
+    var fsBtn = document.createElement('button');
+    fsBtn.id = 'ysfw-fs-btn';
+    fsBtn.textContent = TXT.help.fsOpen;
+    fsBtn.title = TXT.help.fsTitle;
+    // Right end (order:2) of the bottom-right row: the corner anchor the rest line
+    // up against.  Was independently position:fixed at right:8/bottom:8; now a flex
+    // child so "? ヘルプ" and the Room chip sit to its LEFT on the same line.
+    fsBtn.style.cssText = 'order:2;pointer-events:auto;font-size:12px;padding:6px 10px;border-radius:6px;border:1px solid #2a3647;background:rgba(13,20,29,.85);color:#cfd8e3;cursor:pointer';
+    fsBtn.onclick = function () { toggle(); };
+    ysfwBRStack().appendChild(fsBtn);
+  })();
+
+  // ---- VR (WebXR) entry button ----------------------------------------------
+  // Shown only when BOTH are true: the browser has an immersive-vr WebXR runtime
+  // (Module.ysfwVr.supported, set by the engine's WebXR glue in
+  // src/port/platform_emscripten/fswebxr.cpp) AND a flight is running
+  // (globalThis.ysfwInFlight) -- the 2D menus are not presented in VR, so
+  // offering the button in the menu would strand the user in a black void.
+  // Clicking during a session (desktop VR, where the 2D page stays visible)
+  // exits it.  order:1 next to the help button; fullscreen keeps the corner.
+  (function () {
+    // VR perf knobs for on-headset A/B testing (read by the WebXR glue at
+    // session start): ?vrscale=0.5 halves the XR framebuffer per axis,
+    // ?vrfov=0..1 sets Quest fixed foveation, ?vrfps=72|90 the target refresh
+    // rate, ?vraa=1 re-enables MSAA. Controller-feel knobs: ?vryawdz=<deg>
+    // rudder-only deadzone (default 6), ?vrexpo=<n> stick exponent curve
+    // (default 1.0 = off) -- see fswebxr.cpp's deflectionFromDeltaQ.
+    // ?vrperf=1 prints a '[vrperf]' phase-breakdown console line every 5s
+    // (engine tick/sim/draw + multiview scene/hud/gui/reticle + JS-side
+    // controller/dial/help-layer EMAs) -- see fswebxr.cpp's printVrPerfLine.
+    (function () {
+      var q = new URLSearchParams(location.search);
+      var o = {};
+      if (q.get('vrscale')) o.scale = parseFloat(q.get('vrscale'));
+      if (q.get('vrfov') !== null && q.get('vrfov') !== '') o.foveation = parseFloat(q.get('vrfov'));
+      if (q.get('vrfps')) o.frameRate = parseFloat(q.get('vrfps'));
+      if (q.get('vraa')) o.antialias = q.get('vraa') === '1';
+      if (q.get('vrhud') === '0') o.hud = false; // kill switch for the VR HUD composite
+      if (q.get('vrreticle') === '0') o.reticle = false; // kill switch for the collimated gunsight reticle (restores the baked flat-HUD crosshair)
+      if (q.get('vrhelp') === '0') o.help = false; // kill switch for the per-hand controller help placards
+      if (q.get('vrperf') === '1') o.perf = true; // print a '[vrperf]' phase-breakdown console line every 5s (see fswebxr.cpp's printVrPerfLine)
+      // ?vrpanel=1 forces the in-flight-dialog quad on (default off: the
+      // right dial's selection guide alone drives any dialog that fits it,
+      // see fswebxr.cpp's guiPanelWanted/maybeForceGuiPanel).
+      if (q.get('vrpanel') === '1') o.guiPanel = true;
+      // ?vryawdz=<deg> rudder-only deadzone (default 6, see fswebxr.cpp's
+      // DEFAULT_YAW_DEADZONE_DEG); ?vrexpo=<n> exponent response curve on all
+      // three stick axes (default 1.0 = off, see DEFAULT_STICK_EXPO).
+      if (q.get('vryawdz') !== null && q.get('vryawdz') !== '') o.yawDeadzoneDeg = parseFloat(q.get('vryawdz'));
+      if (q.get('vrexpo') !== null && q.get('vrexpo') !== '') o.stickExpo = parseFloat(q.get('vrexpo'));
+      // ?vrlayerscale=<f> DIAGNOSTIC (issue: menu-board ring drift on real
+      // Quest): multiplies ONLY the width/height DECLARED to the compositor
+      // for the menu + cursor-overlay quad layers, leaving the app's
+      // ray-intersection model untouched.  If rings meet the rays everywhere
+      // at 0.5, the compositor displays quads at twice the declared metric
+      // size and the declaration is the bug's home.
+      if (q.get('vrlayerscale') !== null && q.get('vrlayerscale') !== '') o.layerScale = parseFloat(q.get('vrlayerscale'));
+      // ?vrtrace=1 DIAGNOSTIC (the 2026-08-31 Quest hang): writes the current
+      // XR-frame phase to localStorage synchronously, so a frame that never
+      // returns leaves behind the name of the phase it died in.  diag.js
+      // reports it with the next load's unclean-end event.  Costs a
+      // localStorage write per phase per frame -- opt-in, never on by default.
+      if (q.get('vrtrace') === '1') o.trace = true;
+      Module.ysfwVrOptions = o;
+    })();
+    var vrBtn = document.createElement('button');
+    vrBtn.id = 'ysfw-vr-btn';
+    vrBtn.textContent = TXT.help.vrEnter;
+    vrBtn.title = TXT.help.vrTitle;
+    vrBtn.style.cssText = 'order:1;pointer-events:auto;font-size:12px;padding:6px 10px;border-radius:6px;border:1px solid #2a3647;background:rgba(13,20,29,.85);color:#cfd8e3;cursor:pointer;display:none';
+    var inVr = false;
+    // Red notice toast shared by every VR entry point's failure path (issue
+    // #79: the tap-overlay retry and the autostart used to swallow setup
+    // failures silently -- every catch must end in something visible).
+    function vrFailToast() {
+      var n = document.createElement('div');
+      n.textContent = TXT.help.vrFail;
+      n.style.cssText = 'position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:100001;background:rgba(60,16,16,.92);color:#f5d5d5;border:1px solid #5a2a2a;border-radius:8px;padding:8px 14px;font-size:12px';
+      document.body.appendChild(n);
+      setTimeout(function () { if (n.parentNode) n.remove(); }, 5000);
+    }
+    vrBtn.onclick = function () {
+      var vr = Module.ysfwVr;
+      if (!vr) return;
+      if (vr.session) { vr.exit(); return; }
+      vrBtn.disabled = true;
+      vr.enter().catch(function () {
+        vrBtn.disabled = false;
+        vrFailToast();
+      });
+    };
+    Module.onVrFail = function (reason) {
+      // Failed VR ENTRY, counted as its own metric event: vr-end needs a
+      // session, so a requestSession rejection (the phone-Chrome class that
+      // shows the VR button and then refuses the session) left no trace at
+      // all -- and "how many bounce at the VR door, on what device" is
+      // exactly what a VR announcement needs to read.  The glue calls this
+      // only when no vr-end will fire for the attempt, so the two never
+      // count the same failure twice.
+      if (globalThis.ysfwDiag) globalThis.ysfwDiag.push('vr-fail', { reason: reason || null });
+    };
+    Module.onVrStart = function () {
+      inVr = true; vrBtn.disabled = false; vrBtn.textContent = TXT.help.vrExit;
+      // VR usage signal (count in Workers Logs, filter '"type":"vr-start"'):
+      // the engine glue calls onVrStart for every entry path (corner button,
+      // portal autostart, tap overlay), so this is one event per VR session.
+      // inFlight distinguishes menu-entry from in-flight entry; the device
+      // arrives as the batch's [clientlog-meta] UA line.
+      if (globalThis.ysfwDiag) globalThis.ysfwDiag.push('vr-start', { inFlight: !!globalThis.ysfwInFlight });
+    };
+    Module.onVrEnd = function () {
+      inVr = false; vrBtn.disabled = false; vrBtn.textContent = TXT.help.vrEnter;
+      // Session summary next to vr-start: how long VR actually held the user
+      // (a 10s bounce and a 20min flight argue differently about investing in
+      // an in-VR lobby).  Read endReason before the branches below clear it.
+      if (globalThis.ysfwDiag) {
+        var vrStats = Module.ysfwVr && Module.ysfwVr.stats;
+        globalThis.ysfwDiag.push('vr-end', {
+          reason: (Module.ysfwVr && Module.ysfwVr.endReason) || null,
+          seconds: vrStats && vrStats.seconds ? Math.round(vrStats.seconds) : 0,
+          avgFps: vrStats && vrStats.avgFps ? Math.round(vrStats.avgFps) : 0,
+          // The diagnosis trio for sessions that only exist remotely: the
+          // GRANTED compositor rate (44fps@72Hz is missed vsyncs, 60fps@60Hz
+          // is clean pacing), engine CPU ms/frame (CPU-bound or not), and the
+          // 30s fps buckets (warm-up cost vs degradation over time).
+          grantedHz: vrStats && vrStats.grantedHz ? vrStats.grantedHz : 0,
+          cpuMs: vrStats && vrStats.cpuMs ? Math.round(vrStats.cpuMs * 10) / 10 : 0,
+          fpsSeries: (vrStats && vrStats.fpsSeries) || []
+        });
+      }
+      // Menu-in-VR needs the WebXR layers path (XRQuadLayer). When the session
+      // was auto-ended by the watchdog because the menu quad could never be
+      // created (fswebxr.cpp sets endReason), explain why instead of silently
+      // dropping the user back to the 2D page.
+      var vrEndReason = Module.ysfwVr && Module.ysfwVr.endReason;
+      if (vrEndReason === 'menu-unsupported' || vrEndReason === 'not-menu-or-flight') {
+        Module.ysfwVr.endReason = null;
+        var m = document.createElement('div');
+        m.textContent = (vrEndReason === 'menu-unsupported' ? TXT.help.vrMenuUnsupported : TXT.help.vrWrongContext);
+        m.style.cssText = 'position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:100001;background:rgba(60,16,16,.92);color:#f5d5d5;border:1px solid #5a2a2a;border-radius:8px;padding:8px 14px;font-size:12px;max-width:80vw';
+        document.body.appendChild(m);
+        setTimeout(function () { if (m.parentNode) m.remove(); }, 8000);
+        return; // No fps summary for a session that never presented anything.
+      }
+      // Post-session fps summary: the practical readout for headset A/B runs,
+      // where the browser console is out of reach.
+      var st = Module.ysfwVr && Module.ysfwVr.stats;
+      if (st && st.avgFps) {
+        var n = document.createElement('div');
+        n.style.cssText = 'position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:100001;background:rgba(13,20,29,.92);color:#cfe0f5;border:1px solid #2a3647;border-radius:8px;padding:8px 14px;font-size:13px';
+        // CPU ms/frame next to fps: if CPU ms ~= the frame period, the frame
+        // is CPU-bound (resolution won't help); if far below, it's not.
+        var cpu = (st.cpuMs ? ', ' + st.cpuMs.toFixed(0) + 'ms CPU/frame' : '');
+        var line1 = document.createElement('div');
+        // grantedHz: the compositor rate the session actually ran at -- avg
+        // fps right below it means clean pacing; well under it means missed
+        // vsyncs (see fswebxr.cpp's updateTargetFrameRate negotiation).
+        var hz = (st.grantedHz ? ' @' + st.grantedHz + 'Hz' : '');
+        line1.textContent = 'VR: ' + st.avgFps.toFixed(1) + ' fps' + hz + ' (avg, ' + st.seconds.toFixed(0) + 's)' + cpu;
+        n.appendChild(line1);
+        // Phase-breakdown second line (fswebxr.cpp's vr.stats.phases,
+        // snapshotted at session end from the same engine/JS perf numbers
+        // the in-VR placard and '[vrperf]' console line show). A separate
+        // child div (not string concatenation into n.textContent) so the
+        // two lines wrap independently. Shown whenever the snapshot is
+        // nonzero -- not gated behind ?vrperf=1: the snapshot costs
+        // nothing, and this chip is what actually gets read after a
+        // headset A/B run.
+        var ph = st.phases;
+        if (ph && (ph.sim || ph.draw || ph.scene || ph.hud || ph.gui || ph.reticle || ph.ctl || ph.dial || ph.layers)) {
+          var line2 = document.createElement('div');
+          line2.style.cssText = 'font-size:11px;opacity:.85;margin-top:3px';
+          line2.textContent = 'sim ' + ph.sim.toFixed(1) + ' / draw ' + ph.draw.toFixed(1) +
+            ' (scene ' + ph.scene.toFixed(1) + ' hud ' + ph.hud.toFixed(1) + ' gui ' + ph.gui.toFixed(1) + ') / js ' +
+            (ph.ctl + ph.dial + ph.layers).toFixed(1);
+          n.appendChild(line2);
+        }
+        n.onclick = function () { if (n.parentNode) n.remove(); };
+        document.body.appendChild(n);
+        setTimeout(function () { if (n.parentNode) n.remove(); }, 12000);
+      }
+    };
+    ysfwBRStack().appendChild(vrBtn);
+    // "Play in VR" autostart (packs-ui.js sets window.__ysfwVrAutostart on its
+    // VR play button): once the engine is up and XR support is confirmed, try
+    // vr.enter() straight away.  The click's transient user activation rarely
+    // survives the wasm boot, so a rejection is the EXPECTED path -- it shows
+    // a big one-tap overlay instead of failing silently.  Either way the
+    // visitor asked for VR on the portal and lands in the VR menu with at
+    // most one extra tap.
+    var vrAutostartTried = false;
+    function showVrTapOverlay() {
+      var wrap = document.createElement('div');
+      wrap.id = 'ysfw-vr-tap';
+      wrap.style.cssText = 'position:fixed;inset:0;z-index:100002;display:flex;align-items:center;justify-content:center;background:rgba(4,8,14,.66)';
+      var btn = document.createElement('button');
+      btn.style.cssText = 'padding:22px 34px;border-radius:14px;border:1px solid #4da3ff;background:#0d141d;color:#e6edf3;cursor:pointer;text-align:center';
+      var b1 = document.createElement('div');
+      b1.textContent = TXT.help.vrTapEnter;
+      b1.style.cssText = 'font-size:20px;font-weight:700';
+      var b2 = document.createElement('div');
+      b2.textContent = TXT.help.vrTapEnterSub;
+      b2.style.cssText = 'font-size:12px;color:#8fa3bb;margin-top:8px';
+      btn.appendChild(b1);
+      btn.appendChild(b2);
+      btn.onclick = function () {
+        wrap.remove();
+        var vr = Module.ysfwVr;
+        // The retry has real user activation, so a failure here is a genuine
+        // setup failure -- say so instead of bouncing silently (issue #79).
+        if (vr && !vr.session) { vr.enter().catch(vrFailToast); }
+      };
+      wrap.addEventListener('click', function (e) { if (e.target === wrap) wrap.remove(); });
+      wrap.appendChild(btn);
+      document.body.appendChild(wrap);
+    }
+    setInterval(function () {
+      var vr = Module.ysfwVr;
+      var show = !!(vr && vr.supported);
+      vrBtn.style.display = show ? '' : 'none';
+      if (show && window.__ysfwVrAutostart && !vrAutostartTried && !vr.session) {
+        vrAutostartTried = true;
+        window.__ysfwVrAutostart = false;
+        // Lost user activation (the expected autostart failure) gets the
+        // one-tap overlay; anything else is a real setup failure where
+        // another tap cannot help -- show the failure toast instead
+        // (issue #79: the overlay used to swallow both cases).
+        vr.enter().catch(function (err) {
+          var name = err && err.name;
+          if (name === 'NotAllowedError' || name === 'SecurityError') { showVrTapOverlay(); }
+          else { vrFailToast(); }
+        });
+      }
+    }, 500);
+  })();
+
+  // ---- Controls legend overlay ---------------------------------------------
+  // A floating "?" button (always visible) and the "?" key toggle a panel that
+  // lists the DEFAULT controls.  Critical for onboarding: with no joystick the
+  // engine falls back to MOUSE-as-stick (VerifyAndFixJoystickAxisAssignment in
+  // fscontrol.cpp), which is non-obvious.  Pure DOM, engine-agnostic.  The key
+  // listener is on the CAPTURE phase so it beats the engine's SDL handler, and it
+  // ignores keystrokes typed into form fields (Room ID / name / pack URL).
+  (function () {
+    var H = TXT.help;
+    var panel = null, open = false;
+    function build() {
+      if (panel) return panel;
+      panel = document.createElement('div');
+      panel.id = 'ysfw-help';
+      panel.style.cssText = 'position:fixed;inset:0;z-index:100000;display:none;align-items:center;justify-content:center;background:rgba(4,8,14,.62)';
+      var card = document.createElement('div');
+      card.style.cssText = 'max-height:84vh;overflow:auto;width:min(440px,90vw);background:#0b121b;border:1px solid #1d2633;border-radius:10px;padding:18px 18px 14px;box-shadow:0 8px 30px rgba(0,0,0,.5)';
+      var h = document.createElement('div');
+      h.textContent = H.title;
+      h.style.cssText = 'color:#e6edf3;font-size:15px;font-weight:700;letter-spacing:.04em;margin-bottom:6px';
+      card.appendChild(h);
+      var intro = document.createElement('div');
+      intro.textContent = H.intro;
+      intro.style.cssText = 'color:#9db4d0;font-size:12.5px;margin-bottom:12px';
+      card.appendChild(intro);
+      H.rows.forEach(function (r) {
+        var row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:12px;padding:5px 0;border-bottom:1px solid #141d28';
+        var k = document.createElement('div');
+        k.textContent = r[0];
+        k.style.cssText = 'flex:0 0 38%;color:#cfe0f5;font:13px/1.4 monospace';
+        var a = document.createElement('div');
+        a.textContent = r[1];
+        a.style.cssText = 'flex:1;color:#9fb2c8;font-size:13px';
+        row.appendChild(k); row.appendChild(a); card.appendChild(row);
+      });
+      var close = document.createElement('button');
+      close.textContent = H.close;
+      close.style.cssText = 'margin-top:14px;width:100%;padding:9px;border:0;border-radius:8px;background:#1b2735;color:#cfd8e3;font-size:13px;cursor:pointer';
+      close.onclick = function () { toggle(false); };
+      card.appendChild(close);
+      panel.appendChild(card);
+      panel.addEventListener('click', function (e) { if (e.target === panel) toggle(false); });
+      document.body.appendChild(panel);
+      return panel;
+    }
+    function toggle(force) {
+      open = (typeof force === 'boolean') ? force : !open;
+      build().style.display = open ? 'flex' : 'none';
+    }
+    // Exposed so the first-ever Quick Flight launch can auto-open the legend once on
+    // PC (the mouse-as-stick fallback is non-obvious); see the freeflight IIFE.
+    window.__ysfwHelpToggle = toggle;
+    // Floating "?" button so touch / no-keyboard users can open it too.  Bottom-LEFT:
+    // Lives in the bottom-right row (order:1 = middle, between the Room/badge slot
+    // and the "⛶ 全画面" button), so "Room: …", "? ヘルプ" and fullscreen line up on
+    // one right-aligned line at the bottom-right corner.  The engine's native menu
+    // bar is at the TOP, so the
+    // bottom corner is always clear of it.  On a touch device IN FLIGHT the
+    // on-screen stick/HUD takes over, so the in-flight touch-HUD toggle below hides
+    // this button (mutually exclusive states: menu vs. flying).
+    var btn = document.createElement('button');
+    btn.id = 'ysfw-help-btn';
+    btn.textContent = H.openHint;
+    btn.title = H.toggleTitle;
+    btn.style.cssText = 'order:1;pointer-events:auto;z-index:99999;font-size:12px;padding:6px 10px;border-radius:6px;border:1px solid #2a3647;background:rgba(13,20,29,.85);color:#cfd8e3;cursor:pointer';
+    btn.onclick = function () { toggle(); };
+    ysfwBRStack().appendChild(btn);
+    function typing() {
+      var el = document.activeElement;
+      if (!el) return false;
+      var t = (el.tagName || '').toLowerCase();
+      return t === 'input' || t === 'textarea' || t === 'select' || el.isContentEditable;
+    }
+    window.addEventListener('keydown', function (e) {
+      if (e.key === '?' && !typing()) { e.preventDefault(); e.stopImmediatePropagation(); toggle(); }
+      else if (e.key === 'Escape' && open) { e.preventDefault(); e.stopImmediatePropagation(); toggle(false); }
+    }, true);
+  })();
+
+  // ---- Mobile touch controls (touch devices, in-flight only) ---------------
+  // A minimal on-screen control set so a phone can fly without a keyboard/mouse,
+  // WITHOUT an engine rebuild: it drives the engine through synthetic events the
+  // port already listens for.
+  //   * Left stick pad -> a BUTTONLESS `mousemove` on #canvas.  The engine's
+  //     mouse-as-stick (FsPollJoystick in fsplatform_emscripten.cpp reads the
+  //     cursor position as aileron/elevator) turns position into pitch/roll;
+  //     buttonless means it never fires.  Releasing recenters (mousemove to canvas
+  //     center) so the stick returns to neutral -- which the engine's bare
+  //     touch=LBUTTONDOWN emulation cannot do.
+  //   * Throttle / fire / gear -> synthetic KeyboardEvent on window (Q/A, Space,
+  //     KeyG), the exact e.code values FsKeyDownCallback reads.
+  // Edges only (the centre/view stays clear), semi-transparent, auto-fades when
+  // idle, and only appears in flight on a touch device.
+  (function () {
+    // Device tier.  PC (fine pointer, no touch) gets no on-screen pad -- it has the
+    // keyboard/mouse + the controls legend.  Phone vs tablet are distinguished by the
+    // shorter viewport edge: phone is a deliberate TASTER (a small control set + a
+    // nudge toward PC/tablet); tablet has room for the fuller rail (added later).
+    var coarse = (window.matchMedia && matchMedia('(pointer: coarse)').matches) || navigator.maxTouchPoints > 0 || ('ontouchstart' in window);
+    if (!coarse) return;
+    var tier = Math.min(window.innerWidth, window.innerHeight) >= 820 ? 'tablet' : 'phone';
+    var T = TXT.touch;
+    function canvas() { return document.getElementById('canvas') || document.querySelector('canvas'); }
+    function steer(defX, defY) { // defX,defY in [-1,1]; (0,0) = neutral
+      var c = canvas(); if (!c) return;
+      var r = c.getBoundingClientRect();
+      var denom = Math.min(r.width, r.height) / 2;
+      var x = r.left + r.width / 2 + defX * denom;
+      var y = r.top + r.height / 2 + defY * denom;
+      c.dispatchEvent(new MouseEvent('mousemove', { clientX: x, clientY: y, buttons: 0, bubbles: true }));
+    }
+    function key(code, down) { window.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', { code: code, bubbles: true })); }
+    function tap(code) { key(code, true); setTimeout(function () { key(code, false); }, 60); }
+
+    var wrap = document.createElement('div');
+    wrap.id = 'ysfw-touch';
+    wrap.style.cssText = 'position:fixed;inset:0;z-index:30;pointer-events:none;display:none;transition:opacity .4s';
+    document.body.appendChild(wrap);
+    var idleTimer = null;
+    function wake() { wrap.style.opacity = '0.92'; if (idleTimer) clearTimeout(idleTimer); idleTimer = setTimeout(function () { wrap.style.opacity = '0.32'; }, 4000); }
+
+    // Left stick pad.
+    var pad = document.createElement('div');
+    pad.id = 'ysfw-stick';
+    pad.style.cssText = 'position:absolute;left:14px;bottom:14px;width:130px;height:130px;border-radius:50%;border:1px solid rgba(143,163,187,.5);background:rgba(13,20,29,.5);pointer-events:auto;touch-action:none';
+    var knob = document.createElement('div');
+    knob.id = 'ysfw-stick-knob';
+    knob.style.cssText = 'position:absolute;left:50%;top:50%;width:54px;height:54px;margin:-27px 0 0 -27px;border-radius:50%;background:rgba(77,163,255,.55);border:1px solid rgba(77,163,255,.9)';
+    pad.appendChild(knob);
+    wrap.appendChild(pad);
+    var padId = null, padR = 65;
+    function padMove(t) {
+      var r = pad.getBoundingClientRect();
+      var dx = (t.clientX - (r.left + r.width / 2)) / padR;
+      var dy = (t.clientY - (r.top + r.height / 2)) / padR;
+      var m = Math.hypot(dx, dy); if (m > 1) { dx /= m; dy /= m; }
+      knob.style.left = (50 + dx * 38) + '%';
+      knob.style.top = (50 + dy * 38) + '%';
+      steer(dx, dy); wake();
+    }
+    pad.addEventListener('touchstart', function (e) { e.preventDefault(); padId = e.changedTouches[0].identifier; padMove(e.changedTouches[0]); }, { passive: false });
+    pad.addEventListener('touchmove', function (e) { for (var i = 0; i < e.changedTouches.length; i++) if (e.changedTouches[i].identifier === padId) { e.preventDefault(); padMove(e.changedTouches[i]); } }, { passive: false });
+    function padEnd(e) { for (var i = 0; i < e.changedTouches.length; i++) if (e.changedTouches[i].identifier === padId) { padId = null; knob.style.left = '50%'; knob.style.top = '50%'; steer(0, 0); wake(); } }
+    pad.addEventListener('touchend', padEnd);
+    pad.addEventListener('touchcancel', padEnd);
+
+    function mkBtn(label, css) {
+      var b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = 'pointer-events:auto;touch-action:none;border:1px solid rgba(143,163,187,.5);background:rgba(13,20,29,.6);color:#e6edf3;border-radius:10px;font-size:13px;font-weight:600;' + css;
+      return b;
+    }
+    // Throttle (hold to repeat Q/A) on the right, above fire/gear.
+    // NOTE: the right-bottom corner (right:8,bottom:8) is occupied by the always-on
+    // fullscreen button (#ysfw-fs-btn).  Keep every right-side control at bottom>=54
+    // so nothing overlaps it.
+    var thrUp = mkBtn('▲', 'position:absolute;right:96px;bottom:122px;width:52px;height:48px');
+    var thrDn = mkBtn('▼', 'position:absolute;right:96px;bottom:54px;width:52px;height:48px');
+    var thrLbl = document.createElement('div');
+    thrLbl.textContent = T.thr;
+    thrLbl.style.cssText = 'position:absolute;right:96px;bottom:106px;width:52px;text-align:center;color:#8fa3bb;font-size:10px;pointer-events:none';
+    function holdRepeat(btn, code) {
+      var iv = null;
+      btn.addEventListener('touchstart', function (e) { e.preventDefault(); tap(code); wake(); if (iv) clearInterval(iv); iv = setInterval(function () { tap(code); }, 130); }, { passive: false });
+      var stop = function () { if (iv) { clearInterval(iv); iv = null; } };
+      btn.addEventListener('touchend', stop); btn.addEventListener('touchcancel', stop);
+    }
+    holdRepeat(thrUp, 'KeyQ'); holdRepeat(thrDn, 'KeyA');
+    // Right inner column = the right thumb's frequent combat controls: fire (hold,
+    // lower, biggest/red) and weapon-select (tap, upper -- needed to switch to
+    // missiles before firing them).
+    var fire = mkBtn(T.fire, 'position:absolute;right:14px;bottom:54px;width:72px;height:60px;background:rgba(199,93,106,.35);border-color:rgba(199,93,106,.8)');
+    fire.addEventListener('touchstart', function (e) { e.preventDefault(); key('Space', true); wake(); }, { passive: false });
+    fire.addEventListener('touchend', function () { key('Space', false); });
+    fire.addEventListener('touchcancel', function () { key('Space', false); });
+    var wsel = mkBtn(T.wsel, 'position:absolute;right:14px;bottom:122px;width:72px;height:52px');
+    wsel.addEventListener('touchstart', function (e) { e.preventDefault(); tap('Digit2'); wake(); }, { passive: false });
+
+    // Brake (hold): wheel brake / spoiler on the engine's default B key (SPOILERBRAKE),
+    // held while pressed like fire.  Sits above weapon-select in the right inner
+    // column -- the right thumb is already there, and braking happens on the landing
+    // roll when it is off the throttle.  bottom:182 keeps clear of the fullscreen
+    // button (bottom>=54 rule) and of the tablet radar/autopilot buttons (top).
+    var brake = mkBtn(T.brake, 'position:absolute;right:14px;bottom:182px;width:72px;height:52px;background:rgba(224,168,60,.3);border-color:rgba(224,168,60,.8)');
+    brake.addEventListener('touchstart', function (e) { e.preventDefault(); key('KeyB', true); wake(); }, { passive: false });
+    brake.addEventListener('touchend', function () { key('KeyB', false); });
+    brake.addEventListener('touchcancel', function () { key('KeyB', false); });
+
+    // Calm-moment taps go on the LEFT, ABOVE the stick: the left thumb holds the
+    // stick almost the whole time, so only actions done when flight is settled live
+    // here -- you briefly lift off the stick to tap them.  View toggles cockpit (F1)
+    // <-> outside (F2); gear is used at takeoff/landing.
+    var view = mkBtn(T.view, 'position:absolute;left:14px;bottom:156px;width:60px;height:46px');
+    var viewFlip = 0;
+    view.addEventListener('touchstart', function (e) { e.preventDefault(); tap(viewFlip ? 'F1' : 'F2'); viewFlip = viewFlip ? 0 : 1; wake(); }, { passive: false });
+    var gear = mkBtn(T.gear, 'position:absolute;left:84px;bottom:156px;width:60px;height:46px');
+    gear.addEventListener('touchstart', function (e) { e.preventDefault(); tap('KeyG'); wake(); }, { passive: false });
+
+    wrap.appendChild(thrLbl); wrap.appendChild(thrUp); wrap.appendChild(thrDn);
+    wrap.appendChild(fire); wrap.appendChild(wsel); wrap.appendChild(brake); wrap.appendChild(view); wrap.appendChild(gear);
+
+    // Tablet rail: the bigger screen has room for the fuller control set without
+    // covering the (larger) HUD, so add the controls a phone deliberately omits.
+    // Left, above view/gear = flaps (R/F, calm).  Right-top (empty in flight) =
+    // radar (Digit3) + autopilot-menu (Backspace).  Bottom inboard of the stick
+    // and right cluster = a rudder rocker (Z/C, held; taps KeyX to re-center on
+    // release, like the stick's auto-center).  The HUD's bottom-centre stays clear.
+    if (tier === 'tablet') {
+      var flapLbl = document.createElement('div');
+      flapLbl.textContent = T.flap;
+      flapLbl.style.cssText = 'position:absolute;left:14px;bottom:256px;width:130px;text-align:center;color:#8fa3bb;font-size:10px;pointer-events:none';
+      var flapUp = mkBtn('▲', 'position:absolute;left:14px;bottom:210px;width:60px;height:44px');
+      flapUp.addEventListener('touchstart', function (e) { e.preventDefault(); tap('KeyR'); wake(); }, { passive: false });
+      var flapDn = mkBtn('▼', 'position:absolute;left:84px;bottom:210px;width:60px;height:44px');
+      flapDn.addEventListener('touchstart', function (e) { e.preventDefault(); tap('KeyF'); wake(); }, { passive: false });
+
+      var radar = mkBtn(T.radar, 'position:absolute;right:14px;top:48px;width:88px;height:40px;font-size:12px');
+      radar.addEventListener('touchstart', function (e) { e.preventDefault(); tap('Digit3'); wake(); }, { passive: false });
+      var ap = mkBtn(T.ap, 'position:absolute;right:14px;top:96px;width:88px;height:40px;font-size:12px');
+      ap.addEventListener('touchstart', function (e) { e.preventDefault(); tap('Backspace'); wake(); }, { passive: false });
+
+      function rudderBind(btn, code) {
+        var iv = null;
+        btn.addEventListener('touchstart', function (e) { e.preventDefault(); tap(code); wake(); if (iv) clearInterval(iv); iv = setInterval(function () { tap(code); }, 120); }, { passive: false });
+        var stop = function () { if (iv) { clearInterval(iv); iv = null; } tap('KeyX'); }; // re-center
+        btn.addEventListener('touchend', stop); btn.addEventListener('touchcancel', stop);
+      }
+      var rudLbl = document.createElement('div');
+      rudLbl.textContent = T.rudder;
+      rudLbl.style.cssText = 'position:absolute;left:190px;bottom:62px;width:70px;text-align:center;color:#8fa3bb;font-size:10px;pointer-events:none';
+      var rudL = mkBtn('◀', 'position:absolute;left:190px;bottom:14px;width:70px;height:46px');
+      var rudR = mkBtn('▶', 'position:absolute;right:190px;bottom:14px;width:70px;height:46px');
+      rudderBind(rudL, 'KeyZ'); rudderBind(rudR, 'KeyC');
+
+      wrap.appendChild(flapLbl); wrap.appendChild(flapUp); wrap.appendChild(flapDn);
+      wrap.appendChild(radar); wrap.appendChild(ap);
+      wrap.appendChild(rudLbl); wrap.appendChild(rudL); wrap.appendChild(rudR);
+    }
+
+    // Phone is a taster: the first time flight starts on a phone, nudge toward the
+    // full experience on PC/tablet.  Shown once (localStorage), auto-dismisses.
+    var nudged = false;
+    function maybeNudge() {
+      if (nudged || tier !== 'phone') return;
+      nudged = true;
+      try { if (localStorage.getItem('ysfwTasterNudge')) return; localStorage.setItem('ysfwTasterNudge', '1'); } catch (e) {}
+      var n = document.createElement('div');
+      n.textContent = T.nudge;
+      n.style.cssText = 'position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:100001;max-width:90vw;background:rgba(13,20,29,.92);color:#cfe0f5;border:1px solid #2a3647;border-radius:8px;padding:8px 14px;font-size:12px;text-align:center';
+      n.onclick = function () { if (n.parentNode) n.remove(); };
+      document.body.appendChild(n);
+      setTimeout(function () { if (n.parentNode) n.remove(); }, 7000);
+    }
+
+    // Visible only in flight.  This interval only runs on touch devices (the IIFE
+    // returned early for !coarse), so toggling the help button here keeps it visible
+    // on desktop yet hides it while the on-screen stick occupies the bottom-left
+    // corner in flight.
+    setInterval(function () {
+      var show = !!globalThis.ysfwInFlight;
+      var hb = document.getElementById('ysfw-help-btn');
+      if (show && wrap.style.display === 'none') { wrap.style.display = 'block'; wake(); maybeNudge(); if (hb) hb.style.display = 'none'; }
+      else if (!show && wrap.style.display !== 'none') { wrap.style.display = 'none'; if (hb) hb.style.display = ''; }
+    }, 500);
+  })();
+
+  // Host-side pack advertising (M6): once this browser is hosting a game, start
+  // the shell-owned pack host on the derived pack-room so joiners can pull the
+  // host's enabled packs P2P before they boot.  Keyed on globalThis.ysfwRtc.host
+  // (set by the engine while hosting); independent of the engine's game peer
+  // connection.  startPackHost publishes the manifest with its room claim.
+  (function () {
+    var startedRoom = null, handle = null;
+    setInterval(function () {
+      var R = globalThis.ysfwRtc;
+      var room = (R && R.host && !R.host.failed) ? R.host.room : null;
+      if (room && startedRoom !== room) {
+        try {
+          if (handle && handle.stop) handle.stop();
+          handle = (window.ysfwPackNet && window.ysfwPackNet.host) ? window.ysfwPackNet.host(room) : null;
+          startedRoom = room;
+        } catch (e) { console.warn('[pack-net host] start failed: ' + e); }
+      } else if (!room && startedRoom) {
+        try { if (handle && handle.stop) handle.stop(); } catch (e) {}
+        handle = null; startedRoom = null;
+      }
+    }, 800);
+  })();
+
+  // Invite join flow: ?join=<id> asks for a player name (unless ?name= is set),
+  // then auto-joins Room <id> over WebRTC as a client.
+  (function () {
+    var q = new URLSearchParams(location.search);
+    var joinRoom = q.get('join');
+    var presetName = q.get('name');
+
+    function startJoin(name) {
+      var nm = (name && name.trim()) || ('Pilot' + Math.floor(1000 + Math.random() * 9000));
+      Module.arguments = Module.arguments.concat(['-client', nm, joinRoom]);
+      loadEngine();
+    }
+
+    // Manual launch: let the user JOIN by typing a Room ID (no invite link).
+    // Submitting just navigates to /?join=<room>(&name=<name>), so the whole
+    // tested invite-link path runs verbatim — pre-boot pack sync holds the boot
+    // gate (preRun reads ysfwJoinRoom from the URL) and the engine boots -client.
+    // Reusing that path means no new join/gate logic and no preRun ordering hazard.
+    function renderManualJoinForm() {
+      if (document.getElementById('ysfw-manual-join')) return;
+      var wrap = document.createElement('div');
+      wrap.id = 'ysfw-manual-join';
+      wrap.style.cssText = 'display:contents';
+      var label = document.createElement('div');
+      label.style.cssText = 'font-size:13px;color:#333';
+      label.textContent = TXT.joinLabel;
+      var inputCss = 'font-size:14px;padding:7px 9px;border-radius:2px;border:1px solid #7F9DB9;background:#fff;color:#000;width:min(260px,70vw);text-align:center';
+      var roomIn = document.createElement('input');
+      roomIn.type = 'text';
+      roomIn.inputMode = 'numeric';
+      roomIn.maxLength = 14;
+      roomIn.placeholder = 'Room ID';
+      roomIn.style.cssText = inputCss;
+      var nameIn = document.createElement('input');
+      nameIn.type = 'text';
+      nameIn.maxLength = 200;
+      nameIn.placeholder = TXT.joinNamePlaceholder;
+      nameIn.style.cssText = inputCss;
+      var err = document.createElement('div');
+      err.style.cssText = 'font-size:12px;color:#C33B1E;min-height:1em';
+      var btn = document.createElement('button');
+      btn.textContent = TXT.joinBtn;
+      btn.style.cssText = 'font-size:13px;padding:8px 22px;border-radius:3.5px;border:1px solid #003C74;background:linear-gradient(180deg,#FFFFFF 0%,#F4F2E7 55%,#E5E1CE 90%,#D8D0B8 100%);color:#000;cursor:pointer;font-weight:700';
+      var go = function () {
+        var room = (roomIn.value || '').trim();
+        if (!room) { err.textContent = TXT.errRoomEmpty; return; }
+        // Keep within the signaling room-key limit (<=16) AND the derived pack
+        // room's base budget (base + "~p" <= 16, so base <= 14): see
+        // pack-net.js derivePackRoom and worker/signal.js.  Restrict the charset
+        // so a pasted invite URL or stray "~" can't desync the derived pack room.
+        if (!/^[A-Za-z0-9_-]{1,14}$/.test(room)) { err.textContent = TXT.errRoomInvalid; return; }
+        var name = (nameIn.value || '').trim();
+        location.href = location.origin + '/?join=' + encodeURIComponent(room) +
+          (name ? '&name=' + encodeURIComponent(name) : '');
+      };
+      btn.addEventListener('click', go);
+      roomIn.addEventListener('keydown', function (e) { if (e.key === 'Enter') go(); });
+      nameIn.addEventListener('keydown', function (e) { if (e.key === 'Enter') go(); });
+      // Collapsed by default.  The join form is only useful to someone who already
+      // has a Room ID / invite, so on a bare manual launch it should NOT compete for
+      // the fold with Quick Flight (the only reliable first-flight route).  A
+      // low-emphasis toggle reveals the (byte-for-byte identical) form on demand; the
+      // ?join= invite path uses a SEPARATE form (below) and never reaches here.
+      var stack = document.createElement('div');
+      stack.style.cssText = 'display:none;flex-direction:column;align-items:flex-start;gap:8px;order:9;flex-basis:100%;width:100%;background:#FFFFE1;border:1px solid #ACA899;border-radius:2px;padding:10px 12px;box-sizing:border-box';
+      stack.appendChild(label);
+      stack.appendChild(roomIn);
+      stack.appendChild(nameIn);
+      stack.appendChild(err);
+      stack.appendChild(btn);
+      var toggle = document.createElement('button');
+      toggle.textContent = TXT.joinToggle;
+      toggle.style.cssText = 'font-size:13px;padding:7px 14px;border-radius:3.5px;border:1px solid #003C74;background:linear-gradient(180deg,#FFFFFF 0%,#F4F2E7 55%,#E5E1CE 90%,#D8D0B8 100%);color:#000;cursor:pointer';
+      toggle.addEventListener('click', function () {
+        var open = stack.style.display !== 'none';
+        stack.style.display = open ? 'none' : 'flex';
+        if (!open) setTimeout(function () { roomIn.focus(); }, 30);
+      });
+      wrap.appendChild(toggle);
+      wrap.appendChild(stack);
+      overlay.appendChild(wrap);
+    }
+
+    // Host form: a collapsed "Play with friends" disclosure for the bare manual
+    // launch.  Hosting is a real web entry now (web-shell increment 6): submitting
+    // navigates to /?host=1&name=<name>, so the whole tested deep-link path runs
+    // verbatim — deeplink.js emits -server and the engine boots STRAIGHT into
+    // server mode (no engine menu).  Same navigate-don't-mutate pattern as the
+    // manual join form above.  Pack choices survive the navigation (enabled packs
+    // live in the pack registry and re-materialize on every boot).
+    function renderHostForm() {
+      if (document.getElementById('ysfw-host-form')) return;
+      var H = TXT.host;
+      var wrap = document.createElement('div');
+      wrap.id = 'ysfw-host-form';
+      wrap.style.cssText = 'display:contents';
+      var card = document.createElement('div');
+      card.style.cssText = 'display:none;flex-direction:column;align-items:flex-start;gap:8px;order:9;flex-basis:100%;width:100%;background:#FFFFE1;border:1px solid #ACA899;border-radius:2px;padding:10px 12px;box-sizing:border-box';
+      var nameIn = document.createElement('input');
+      nameIn.type = 'text';
+      nameIn.maxLength = 200;
+      nameIn.placeholder = H.namePlaceholder;
+      nameIn.style.cssText = 'font-size:14px;padding:7px 9px;border-radius:2px;border:1px solid #7F9DB9;background:#fff;color:#000;width:min(260px,70vw);text-align:center';
+      var btn = document.createElement('button');
+      btn.textContent = H.btn;
+      btn.style.cssText = 'font-size:13px;padding:8px 22px;border-radius:3.5px;border:1px solid #003C74;background:linear-gradient(180deg,#FFFFFF 0%,#F4F2E7 55%,#E5E1CE 90%,#D8D0B8 100%);color:#000;cursor:pointer;font-weight:700';
+      var go = function () {
+        var name = (nameIn.value || '').trim() || ('Pilot' + Math.floor(1000 + Math.random() * 9000));
+        location.href = location.origin + '/?host=1&name=' + encodeURIComponent(name);
+      };
+      btn.addEventListener('click', go);
+      nameIn.addEventListener('keydown', function (e) { if (e.key === 'Enter') go(); });
+      var hintRow = document.createElement('div');
+      hintRow.style.cssText = 'color:#333;font-size:12px;line-height:1.55;text-align:left';
+      hintRow.textContent = H.hint;
+      var noteRow = document.createElement('div');
+      noteRow.style.cssText = 'color:#555;font-size:11px;line-height:1.5;text-align:left';
+      noteRow.textContent = H.note;
+      card.appendChild(nameIn);
+      card.appendChild(btn);
+      card.appendChild(hintRow);
+      card.appendChild(noteRow);
+      var toggle = document.createElement('button');
+      toggle.textContent = H.toggle;
+      toggle.style.cssText = 'font-size:13px;padding:7px 14px;border-radius:3.5px;border:1px solid #003C74;background:linear-gradient(180deg,#FFFFFF 0%,#F4F2E7 55%,#E5E1CE 90%,#D8D0B8 100%);color:#000;cursor:pointer';
+      toggle.addEventListener('click', function () {
+        var open = card.style.display !== 'none';
+        card.style.display = open ? 'none' : 'flex';
+        if (!open) setTimeout(function () { nameIn.focus(); }, 30);
+      });
+      wrap.appendChild(toggle);
+      wrap.appendChild(card);
+      overlay.appendChild(wrap);
+      // A bare ?host= (no &name= -> manual-launch path, incl. legacy ?host=1
+      // links) auto-expands: the visitor already said "I want to host".
+      try { if (new URLSearchParams(location.search).get('host')) { card.style.display = 'flex'; setTimeout(function () { nameIn.focus(); }, 30); } } catch (e) {}
+    }
+
+    if (joinRoom && !presetName) {
+      statusEl.textContent = '';
+      var form = document.createElement('div');
+      form.style.cssText = 'margin-top:18px;display:flex;flex-direction:column;align-items:center;gap:10px';
+      var label = document.createElement('div');
+      label.style.cssText = 'font-size:13px;color:#333';
+      label.textContent = TXT.inviteNameLabel(joinRoom);
+      var input = document.createElement('input');
+      input.type = 'text';
+      input.maxLength = 200;
+      input.placeholder = 'Pilot';
+      input.style.cssText = 'font-size:14px;padding:7px 9px;border-radius:2px;border:1px solid #7F9DB9;background:#fff;color:#000;width:min(260px,70vw);text-align:center';
+      var goBtn = document.createElement('button');
+      goBtn.textContent = TXT.inviteJoinBtn;
+      goBtn.style.cssText = 'font-size:13px;padding:8px 22px;border-radius:3.5px;border:1px solid #003C74;background:linear-gradient(180deg,#FFFFFF 0%,#F4F2E7 55%,#E5E1CE 90%,#D8D0B8 100%);color:#000;cursor:pointer;font-weight:700';
+      var go = function () { form.remove(); statusEl.textContent = 'loading...'; startJoin(input.value); };
+      goBtn.addEventListener('click', go);
+      input.addEventListener('keydown', function (e) { if (e.key === 'Enter') go(); });
+      form.appendChild(label); form.appendChild(input); form.appendChild(goBtn);
+      overlay.appendChild(form);
+      setTimeout(function () { input.focus(); }, 50);
+    } else {
+      if (joinRoom && presetName) {
+        Module.arguments = Module.arguments.concat(['-client', presetName, joinRoom]);
+      } else if (!globalThis.ysfwDeepLink.isDirectBoot(q)) {
+        // No invite link and no deep-link boot (?freeflight / ?endurance / ... /
+        // ?host with a name): a deliberate manual launch.  Offer "join by Room ID"
+        // and "host a room" next to the pack panel; the engine still loads (for
+        // solo), but submitting either form navigates away to its deep-link flow
+        // before main() matters.  (A bare ?host= lands here and auto-expands the
+        // host form.)  Direct boots skip both forms — they'd only flash over the
+        // loading overlay of an already-decided launch.
+        renderManualJoinForm();
+        renderHostForm();
+      }
+      loadEngine();
+    }
+  })();
+</script>
+<!-- Cloudflare Web Analytics: privacy-first, no cookies/PII. Single-page shell
+     (no client-side route pushState across distinct pages), so spa mode is
+     left at its default (off). -->
+<script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "acfa225fd677463d86c28106ea16db47"}'></script>
+</body>
+</html>
